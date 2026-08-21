@@ -104,9 +104,9 @@ kubeconfig 中的 API Server 地址必须能从容器网络访问；指向宿主
 
 Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。GoReleaser 统一生成五个平台归档和 SHA-256 校验文件；Actions 只负责触发策略、凭据、对象存储、GHCR 和公开可用性验证。发布分为三个通道：
 
-- 稳定标签 `vX.Y.Z`：发布不可变的 OSS 归档和容器镜像 digest，并创建仅授权用户可访问的 GitHub Release 副本。GHCR 同名标签是经过发布时校验的便捷引用，不属于不可变合同。
-- `main` 每次更新：覆盖发布 OSS 和 GHCR 的 `latest`，并在该 workflow run 中保留名为 `release-binaries-latest` 的 Actions artifact。
-- 手动调度：从 `main` 上运行 Rolling Release workflow，输入仓库中已有的远端分支。工作流将分支名归一化为 `branch-<name>`，覆盖发布同名 OSS 目录、GHCR 标签和 Actions artifact。若原分支名包含 `/`、大写字符或其他不安全字符，版本末尾会附加短哈希；最终版本名会写入 job summary。
+- 稳定标签 `vX.Y.Z`：向 OSS 和 S3 兼容存储发布不可变归档及容器镜像 digest，并创建仅授权用户可访问的 GitHub Release 副本。GHCR 同名标签是经过发布时校验的便捷引用，不属于不可变合同。
+- `main` 每次更新：覆盖发布 OSS、S3 兼容存储和 GHCR 的 `latest`，并在该 workflow run 中保留名为 `release-binaries-latest` 的 Actions artifact。
+- 手动调度：从 `main` 上运行 Rolling Release workflow，输入仓库中已有的远端分支。工作流将分支名归一化为 `branch-<name>`，覆盖发布同名对象存储目录、GHCR 标签和 Actions artifact。若原分支名包含 `/`、大写字符或其他不安全字符，版本末尾会附加短哈希；最终版本名会写入 job summary。
 
 手动发布指定分支：
 
@@ -114,17 +114,24 @@ Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和�
 gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
 ```
 
-稳定版 OSS 对象和 GitHub Release 资产不可覆盖；同一提交产生的相同内容可在失败后继续发布。稳定版 OSS 上传使用服务端禁止覆盖参数，并将容器镜像 digest 保存为不可变对象。若 OSS 对象、GHCR 标签或 GitHub Release 资产已存在但内容、digest 或源码 revision 不同，workflow 会停止。`latest` 和分支版本是可变通道。所有通道都会构建五个平台归档、生成 SHA-256 校验文件并发布多架构 GHCR 镜像。只有稳定标签会创建 GitHub Release。
+稳定版 OSS、S3 兼容存储对象和 GitHub Release 资产不可覆盖；同一提交产生的相同内容可在失败后继续发布。OSS 上传使用服务端禁止覆盖参数；S3 上传使用 `If-None-Match: *` 条件请求。两个后端都会保存容器镜像 digest。若对象、GHCR 标签或 GitHub Release 资产已存在但内容、digest 或源码 revision 不同，workflow 会停止。`latest` 和分支版本是可变通道。所有通道都会构建五个平台归档、生成 SHA-256 校验文件并发布多架构 GHCR 镜像。只有稳定标签会创建 GitHub Release。
 
 仓库需要配置以下 Actions secrets：
 
 - `HAMI_ENTERPRISE_REPO_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
-- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要读取 Bucket 版本控制状态，读取和写入对象，并能设置对象 ACL。发布 Bucket 必须关闭版本控制；版本控制处于 `Enabled` 或 `Suspended` 状态时，OSS 会忽略禁止覆盖参数，workflow 因此会停止。
-- `ALIYUN_OSS_ENDPOINT`：可选的 OSS 原生端点；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。发布脚本使用固定版本的 `ossutil`，稳定版上传会设置 `x-oss-forbid-overwrite: true`。
+- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`：OSS 访问凭据。
+- `ALIYUN_OSS_BUCKET`、`ALIYUN_OSS_ENDPOINT`、`ALIYUN_OSS_REGION`：OSS Bucket 名称、原生 API 端点和区域。工作流不推导默认端点，这三个 Secret 均为必填项。对应 RAM 身份需要读取 Bucket 版本控制状态，读取和写入对象，并能设置对象 ACL。发布 Bucket 必须关闭版本控制；版本控制处于 `Enabled` 或 `Suspended` 状态时，workflow 会停止。
+- `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`：S3 兼容存储访问凭据。
+- `S3_BUCKET`、`S3_ENDPOINT`、`S3_REGION`：S3 兼容存储的 Bucket 名称、API 端点和区域。使用 Cloudflare R2 时，`S3_ENDPOINT` 为 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`，`S3_REGION` 为 `auto`。R2 API Token 至少需要目标 Bucket 的 Object Read & Write 权限。
+
+仓库还需要配置以下 Actions variables：
+
+- `ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL`：OSS 公开下载前缀。默认值为 `https://storage.dynamia.ai/hami-cli`。
+- `S3_PUBLIC_DOWNLOAD_BASE_URL`：S3 兼容存储公开下载前缀，无默认值。使用 R2 时，需要先为 Bucket 启用公开自定义域名或 `r2.dev` 地址，再将包含 `/hami-cli` 的公开前缀写入该变量。R2 不支持 S3 对象 ACL，发布脚本不会设置 `public-read`。
 
 由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
 
-如公开下载域名不是 `https://storage.dynamia.ai/hami-cli`，设置 Actions variable `HAMI_CLI_DOWNLOAD_BASE_URL`。工作流会从公开域名逐个下载并比对上传结果，避免把“OSS 上传成功”误当成“用户已可下载”。当前 workflow 只发布 OSS；R2 尚未接入，也不会读取 R2 secrets。
+工作流会从两个公开下载前缀逐个下载并比对上传结果，避免把对象上传成功误当成用户已可下载。任一后端上传或公开验证失败时，发布任务都会停止。
 
 ## 厂商插件方向
 

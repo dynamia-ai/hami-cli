@@ -19,11 +19,17 @@ case "$mode" in
     ;;
 esac
 
-: "${OSS_ACCESS_KEY_ID:?OSS_ACCESS_KEY_ID is required}"
-: "${OSS_ACCESS_KEY_SECRET:?OSS_ACCESS_KEY_SECRET is required}"
-: "${OSS_BUCKET:?OSS_BUCKET is required}"
-: "${OSS_REGION:?OSS_REGION is required}"
-: "${OSS_ENDPOINT:?OSS_ENDPOINT is required}"
+: "${ALIYUN_OSS_ACCESS_KEY_ID:?ALIYUN_OSS_ACCESS_KEY_ID is required}"
+: "${ALIYUN_OSS_ACCESS_KEY_SECRET:?ALIYUN_OSS_ACCESS_KEY_SECRET is required}"
+: "${ALIYUN_OSS_BUCKET:?ALIYUN_OSS_BUCKET is required}"
+: "${ALIYUN_OSS_REGION:?ALIYUN_OSS_REGION is required}"
+: "${ALIYUN_OSS_ENDPOINT:?ALIYUN_OSS_ENDPOINT is required}"
+
+# ossutil reads these vendor-defined environment variables directly.
+export OSS_ACCESS_KEY_ID="$ALIYUN_OSS_ACCESS_KEY_ID"
+export OSS_ACCESS_KEY_SECRET="$ALIYUN_OSS_ACCESS_KEY_SECRET"
+export OSS_REGION="$ALIYUN_OSS_REGION"
+export OSS_ENDPOINT="$ALIYUN_OSS_ENDPOINT"
 
 shopt -s nullglob
 artifacts=("$dist_dir"/*.tar.gz "$dist_dir/checksums.txt")
@@ -43,7 +49,7 @@ done
 
 if [[ "$mode" = immutable ]]; then
   versioning="$(ossutil api get-bucket-versioning \
-    --bucket "$OSS_BUCKET" --output-format json)"
+    --bucket "$ALIYUN_OSS_BUCKET" --output-format json)"
   if ! jq -e . <<< "$versioning" >/dev/null; then
     echo "failed to parse OSS bucket versioning state" >&2
     exit 1
@@ -76,7 +82,7 @@ download_and_compare() {
 for artifact in "${artifacts[@]}"; do
   name="${artifact##*/}"
   key="hami-cli/$version/$name"
-  object="oss://$OSS_BUCKET/$key"
+  object="oss://$ALIYUN_OSS_BUCKET/$key"
   content_type=application/gzip
   [[ "$name" = *.txt ]] && content_type=text/plain
 
@@ -97,7 +103,7 @@ for artifact in "${artifacts[@]}"; do
 
     upload_error="$(mktemp)"
     if ossutil api put-object \
-      --bucket "$OSS_BUCKET" \
+      --bucket "$ALIYUN_OSS_BUCKET" \
       --key "$key" \
       --body "file://$artifact" \
       --forbid-overwrite=true \
@@ -119,7 +125,7 @@ for artifact in "${artifacts[@]}"; do
   fi
 
   ossutil api put-object \
-    --bucket "$OSS_BUCKET" \
+    --bucket "$ALIYUN_OSS_BUCKET" \
     --key "$key" \
     --body "file://$artifact" \
     --object-acl public-read \

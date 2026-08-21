@@ -27,7 +27,8 @@ env:
   OSSUTIL_VERSION: 2.3.0
   OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
   IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
-  PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.HAMI_CLI_DOWNLOAD_BASE_URL || 'https://storage.dynamia.ai/hami-cli' }}
+  ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL || 'https://storage.dynamia.ai/hami-cli' }}
+  S3_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.S3_PUBLIC_DOWNLOAD_BASE_URL }}
 
 jobs:
   release:
@@ -101,16 +102,30 @@ jobs:
       - name: Validate credentials
         env:
           HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_REGION: ${{ secrets.S3_REGION }}
         run: |
           test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-          test -n "$OSS_ACCESS_KEY_ID"
-          test -n "$OSS_ACCESS_KEY_SECRET"
-          test -n "$OSS_BUCKET"
-          test -n "$OSS_REGION"
+          test -n "$ALIYUN_OSS_ACCESS_KEY_ID"
+          test -n "$ALIYUN_OSS_ACCESS_KEY_SECRET"
+          test -n "$ALIYUN_OSS_BUCKET"
+          test -n "$ALIYUN_OSS_ENDPOINT"
+          test -n "$ALIYUN_OSS_REGION"
+          test -n "$S3_ACCESS_KEY_ID"
+          test -n "$S3_SECRET_ACCESS_KEY"
+          test -n "$S3_BUCKET"
+          test -n "$S3_ENDPOINT"
+          test -n "$S3_REGION"
+          test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+          test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -177,12 +192,26 @@ jobs:
 
       - name: Publish mutable artifacts to OSS
         env:
-          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
-          OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT || format('https://oss-{0}.aliyuncs.com', secrets.ALIYUN_OSS_REGION) }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
         run: bash hack/publish-oss.sh mutable "${{ steps.release.outputs.version }}" dist
+
+      - name: Verify AWS CLI
+        run: |
+          aws --version
+          aws s3api put-object --generate-cli-skeleton input | jq -e 'has("IfNoneMatch")'
+
+      - name: Publish mutable artifacts to S3
+        env:
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+        run: bash hack/publish-s3.sh mutable "${{ steps.release.outputs.version }}" dist
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -231,19 +260,21 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          [[ "$PUBLIC_DOWNLOAD_BASE_URL" = https://* ]]
-          for file in dist/*.tar.gz dist/checksums.txt; do
-            verified=false
-            for attempt in {1..8}; do
-              if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \
-                "$PUBLIC_DOWNLOAD_BASE_URL/$VERSION/${file##*/}" \
-                && cmp "$file" "$RUNNER_TEMP/${file##*/}"; then
-                verified=true
-                break
-              fi
-              [[ "$attempt" -lt 8 ]] && sleep 5
+          for base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+            [[ "$base_url" = https://* ]]
+            for file in dist/*.tar.gz dist/checksums.txt; do
+              verified=false
+              for attempt in {1..8}; do
+                if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \
+                  "$base_url/$VERSION/${file##*/}" \
+                  && cmp "$file" "$RUNNER_TEMP/${file##*/}"; then
+                  verified=true
+                  break
+                fi
+                [[ "$attempt" -lt 8 ]] && sleep 5
+              done
+              [[ "$verified" = true ]]
             done
-            [[ "$verified" = true ]]
           done
           mkdir -p "$DOCKER_CONFIG"
           docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null
