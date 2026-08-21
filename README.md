@@ -58,3 +58,73 @@ hami-cli --context TARGET_CONTEXT --request-timeout 20s device assign \
 
 `device list` 和 `pool describe` 的表格包含 `DEVICE-TYPE` 列。操作前的分配检查、
 临时解绑保护和服务端前提见[资源池操作指南](skills/managing-hami-resource-pools/references/operations.md#manage-pool-and-device-ownership)。
+
+## NVIDIA Docker PoC
+
+项目只发布一个用户侧 `hami-cli` 二进制。当前内置 NVIDIA 插件，不加载第三方动态插件，也尚未实现 Ascend 插件。
+
+运行前需要满足以下条件：
+
+- 操作系统和 CPU 架构为 Linux/AMD64；
+- 已安装 NVIDIA 驱动、`nvidia-smi`、rootful Docker 和 NVIDIA Container Toolkit，当前 Docker endpoint 使用本机 `unix://` socket；
+- 已准备 Linux/AMD64 的 `libvgpu.so`，并从可信发布清单或交付渠道取得制品版本和 SHA-256 摘要；
+- 目标镜像使用 glibc；Core 文件权限允许目标容器用户读取；
+- 仅选择一个物理 GPU 索引或 `GPU-...` UUID，不使用 MIG。
+
+命令合同如下：
+
+```text
+hami-cli run --vendor nvidia [HAMi 参数] -- docker run [Docker 参数] IMAGE [COMMAND] [ARG...]
+```
+
+例如：
+
+```bash
+CORE=/opt/hami-core/libvgpu.so
+CORE_VERSION=VERSION
+CORE_SHA256=SHA256_FROM_TRUSTED_RELEASE_MANIFEST
+
+hami-cli run \
+  --vendor nvidia \
+  --device 0 \
+  --memory 8GiB \
+  --compute 50 \
+  --core "$CORE" \
+  --core-version "$CORE_VERSION" \
+  --core-sha256 "$CORE_SHA256" \
+  -- \
+  docker run --rm -it \
+    --name training \
+    -v "$PWD:/workspace" \
+    -w /workspace \
+    --network host \
+    pytorch/pytorch:latest \
+    python train.py --epochs 10
+```
+
+`CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
+
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。Core 文件、ELF 架构和 SHA-256 仍会校验，确保输出绑定的是指定制品：
+
+```bash
+hami-cli run \
+  --vendor nvidia \
+  --device 0 \
+  --memory 8GiB \
+  --compute 50 \
+  --core "$CORE" \
+  --core-version "$CORE_VERSION" \
+  --core-sha256 "$CORE_SHA256" \
+  --dry-run \
+  -- docker run --rm ubuntu:22.04 nvidia-smi
+```
+
+CLI 在 `docker run` 后插入 `--gpus`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
+
+- `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
+- 指向 NVIDIA 的 `--device`；
+- HAMi Core 使用的环境变量，或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
+- 暴露 NVIDIA 设备，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
+- `io.hami.lite.*` 管理标签。
+
+当前 PoC 不支持远端 Docker daemon、rootless Docker 或 musl 镜像，也不提供多容器容量账本、超售控制、调度、抢占、崩溃恢复或宿主机级安全隔离。多个容器的声明总量可能超过物理 GPU 容量，受信任的容器进程也可以绕过 `LD_PRELOAD`。这些场景应使用完整 HAMi 或 HAMi Enterprise。详细边界见 [架构说明](docs/architecture.md)。

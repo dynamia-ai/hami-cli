@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-当前代码仅包含从 `hami-enterprise/cmd/hami-cli` 迁入的资源池命令。迁移保留以下行为：
+当前代码包含从 `hami-enterprise/cmd/hami-cli` 迁入的资源池命令，以及首个 NVIDIA Docker 运行 PoC。资源池迁移保留以下行为：
 
 - kubeconfig、上下文和命名空间参数；
 - `ResourcePool`、`GPUDevice` 和 `ResourcePoolBinding` 的管理命令；
@@ -20,17 +20,35 @@
 - 作为 kubectl 插件执行时的命令显示名称；
 - 独立版本信息。
 
-厂商运行时插件仍处于设计阶段。
+NVIDIA PoC 已实现以下共享合同：
+
+- 只接受 `--` 后的完整 `docker run` argv，不拼接 shell 字符串；
+- 在 `docker run` 后注入参数，保留用户 argv 的值和相对顺序；
+- 校验 Core 版本和 SHA-256 摘要；
+- 校验 Core 是 Linux/AMD64 使用的 ELF64 x86-64 共享对象；
+- 检测会覆盖 GPU、Core 环境变量、挂载路径和管理标签的 Docker 参数；
+- `--dry-run` 输出经过 POSIX shell quoting 的可复制命令；
+- 实际执行通过 `exec` 替换当前进程，保留 Docker 的标准输入输出、退出码和信号。
+
+当前只支持 Linux/AMD64、glibc 镜像、rootful 本机 Docker、NVIDIA、单物理 GPU 和受信任工作负载。远端 Docker daemon、Ascend、多 GPU、MIG、ARM64、rootless、Windows 和 macOS 尚未实现或验证。
 
 ## 目标命令模型
 
-厂商运行时能力计划收敛到统一入口：
+厂商运行时能力使用统一入口：
 
 ```text
 hami-cli run --vendor VENDOR [HAMi 参数] -- docker run [Docker 参数] IMAGE [COMMAND] [ARG...]
 ```
 
-命令形式将在 NVIDIA 插件 PoC 中验证后固定。当前文档中的命令只表示设计方向，不是已经可用的接口。
+NVIDIA 插件当前使用以下参数：
+
+- `--device`：一个 GPU 索引或 `GPU-...` UUID；
+- `--memory`：正整数显存上限，支持字节、KiB、MiB 和 GiB；
+- `--compute`：`1` 到 `100` 的 SM 利用率上限；
+- `--core`、`--core-version` 和 `--core-sha256`：Core 路径、版本和完整性信息；
+- `--dry-run`：只输出最终命令，不执行 Docker，也不检查 Docker endpoint 或本机 GPU。
+
+这些参数固定了首个 NVIDIA PoC 合同。新增厂商时仍需独立验证厂商参数和注入方式，不能直接外推 NVIDIA 行为。
 
 ## 插件边界
 
@@ -50,6 +68,8 @@ hami-cli run --vendor VENDOR [HAMi 参数] -- docker run [Docker 参数] IMAGE [
 - 生成设备节点、挂载、环境变量、标签和运行时参数；
 - 检测会破坏 Core 注入合同的 Docker 参数冲突；
 - 提供厂商特有的诊断信息。
+
+NVIDIA 插件在实际执行前确认当前 Docker context 使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。插件把 `libvgpu.so` 只读挂载到 `/usr/local/vgpu/libvgpu.so`，设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
 
 插件不负责本机容量账本、多容器调度、超售控制、抢占或崩溃恢复。这些能力属于 HAMi 或 HAMi Enterprise 控制面。
 

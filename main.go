@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	hamirun "github.com/dynamia-ai/hami-cli/run"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,6 +48,8 @@ type commandOptions struct {
 	kitupCWD          string
 	quotaPoll         quotaPollFunc
 	quotaPollInterval time.Duration
+	runPlugins        []hamirun.Plugin
+	runRunner         hamirun.Runner
 }
 
 type quotaPollFunc func(context.Context, time.Duration, time.Duration, bool, k8swait.ConditionWithContextFunc) error
@@ -72,7 +75,7 @@ func main() {
 func newRootCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:           "hami-cli",
-		Short:         "Manage HAMi Enterprise physical device resource pools",
+		Short:         "Manage HAMi resources and run local GPU containers",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -87,6 +90,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		newDeviceCommand(options),
 		newApplyCommand(options),
 		newSkillCommand(options),
+		newRunCommand(options),
 		newVersionCommand(options),
 	)
 	command.InitDefaultCompletionCmd()
