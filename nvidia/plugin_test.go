@@ -239,8 +239,10 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 		{name: "per-device environment", args: []string{"-e", "CUDA_DEVICE_MEMORY_LIMIT_0=1g", "image"}, want: "CUDA_DEVICE_MEMORY_LIMIT_0"},
 		{name: "driver capabilities", args: []string{"-e", "NVIDIA_DRIVER_CAPABILITIES=video,utility", "image"}, want: "compute and utility"},
 		{name: "mount", args: []string{"--mount", "type=bind,src=/tmp,dst=/usr/local/vgpu", "image"}, want: "mount target"},
+		{name: "mount destination alias override", args: []string{"--mount", "type=bind,src=/tmp,dst=/workspace,target=/tmp/hami-lite/cudevshr.cache", "image"}, want: "mount target"},
 		{name: "NVIDIA device mount", args: []string{"--mount", "type=bind,src=/dev,dst=/dev", "image"}, want: "mount target"},
 		{name: "volume", args: []string{"-v", "/tmp:/tmp/vgpulock", "image"}, want: "volume target"},
+		{name: "source-less volume with mode", args: []string{"-v", "/tmp/hami-lite/cudevshr.cache:ro", "image"}, want: "volume target"},
 		{name: "tmpfs", args: []string{"--tmpfs=/tmp/hami-lite:rw", "image"}, want: "tmpfs target"},
 		{name: "label", args: []string{"--label", "io.hami.lite.vendor=user", "image"}, want: "managed"},
 	}
@@ -304,7 +306,8 @@ func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 		"--device-cgroup-rule", "c 1:3 rw",
 		"--net", "host",
 		"--env", "NVIDIA_DRIVER_CAPABILITIES=all",
-		"--mount", "type=bind,src=/tmp,dst=/workspace", "image",
+		"--mount", "type=bind,src=/tmp,target=/tmp/hami-lite,dst=/workspace",
+		"--volume", "/workspace-cache:ro", "image",
 		"program", "--env", "LD_PRELOAD=/command-argument", "--gpus", "literal",
 	})
 	if _, err := New().Inject(t.Context(), request); err != nil {
@@ -603,7 +606,7 @@ func TestParseMemory(t *testing.T) {
 		{value: "1024", want: 1024},
 		{value: "8GiB", want: 8 << 30},
 		{value: "512MiB", want: 512 << 20},
-		{value: "4g", want: 4 << 30},
+		{value: "4KiB", want: 4 << 10},
 	}
 	for _, test := range tests {
 		t.Run(test.value, func(t *testing.T) {
@@ -614,7 +617,7 @@ func TestParseMemory(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []string{"", "0", "1.5GiB", "8Gi"} {
+	for _, value := range []string{"", "0", "1.5GiB", "8Gi", "8GB", "8MB", "8KB", "4g", "4G", "8B"} {
 		t.Run("invalid "+value, func(t *testing.T) {
 			t.Parallel()
 			if _, err := parseMemory(value); err == nil {

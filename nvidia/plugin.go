@@ -216,9 +216,6 @@ func parseMemory(value string) (uint64, error) {
 		multiplier uint64
 	}{
 		{"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10},
-		{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10},
-		{"G", 1 << 30}, {"g", 1 << 30}, {"M", 1 << 20}, {"m", 1 << 20},
-		{"K", 1 << 10}, {"k", 1 << 10}, {"B", 1},
 	}
 	multiplier := uint64(1)
 	digits := value
@@ -736,18 +733,27 @@ func mountTarget(value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse Docker --mount value %q: %w", value, err)
 	}
+	target := ""
 	for _, field := range fields {
 		key, fieldValue, found := strings.Cut(field, "=")
 		if found && (key == "dst" || key == "destination" || key == "target") {
-			return fieldValue, nil
+			target = fieldValue
 		}
 	}
-	return "", fmt.Errorf("Docker --mount value %q has no destination", value)
+	if target == "" {
+		return "", fmt.Errorf("Docker --mount value %q has no destination", value)
+	}
+	return target, nil
 }
 
 func volumeTarget(value string) string {
 	parts := strings.Split(value, ":")
 	if len(parts) == 1 {
+		return parts[0]
+	}
+	// Docker permits [source:]target[:options]. With two fields, an absolute
+	// first field followed by a non-absolute field is the target:options form.
+	if len(parts) == 2 && path.IsAbs(parts[0]) && !path.IsAbs(parts[1]) {
 		return parts[0]
 	}
 	return parts[1]
