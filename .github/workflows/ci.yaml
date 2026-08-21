@@ -20,8 +20,20 @@ env:
 
 jobs:
   go:
-    name: Go checks
-    runs-on: ubuntu-latest
+    name: Go checks (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            runner_arch: X64
+            goarch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            runner_arch: ARM64
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Require private module token
@@ -42,6 +54,16 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Verify native architecture
+        env:
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner_arch }}
+          EXPECTED_GOARCH: ${{ matrix.goarch }}
+        run: |
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH"
+          test "$(go env GOOS)" = linux
+          test "$(go env GOARCH)" = "$EXPECTED_GOARCH"
+
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -58,18 +80,30 @@ jobs:
       - name: Upload coverage
         uses: actions/upload-artifact@v7
         with:
-          name: go-coverage
+          name: go-coverage-${{ matrix.goarch }}
           path: cover.out
           if-no-files-found: error
           retention-days: 7
 
   image:
-    name: Container build
-    runs-on: ubuntu-latest
+    name: Container build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            runner_arch: X64
+            goarch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            runner_arch: ARM64
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
-      IMAGE_REF: local/hami-cli:${{ github.sha }}
-      IMAGE_PLATFORM: linux/amd64
+      IMAGE_REF: local/hami-cli:${{ github.sha }}-${{ matrix.goarch }}
+      IMAGE_PLATFORM: ${{ matrix.platform }}
       IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
       IMAGE_REVISION: ${{ github.sha }}
     steps:
@@ -83,6 +117,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify native architecture
+        env:
+          EXPECTED_RUNNER_ARCH: ${{ matrix.runner_arch }}
+        run: |
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
