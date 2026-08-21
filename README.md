@@ -104,7 +104,7 @@ hami-cli run \
 
 `CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
 
-`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。Core 文件、ELF 架构和 SHA-256 仍会校验，确保输出绑定的是指定制品：
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 输出引用调用时校验的原始路径，不会为后续执行保留文件快照：
 
 ```bash
 hami-cli run \
@@ -119,12 +119,16 @@ hami-cli run \
   -- docker run --rm ubuntu:22.04 nvidia-smi
 ```
 
+真实执行时，CLI 把 Core 字节复制到权限为 `0700` 的私有临时目录，再从同一个只读快照完成 SHA-256 和 ELF 校验并挂载到容器。即使原始路径随后被替换，Docker 读取的仍是通过校验的快照。清理辅助进程在 Docker 客户端退出后删除快照目录。
+
 CLI 在 `docker run` 后插入 `--gpus`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
-- 指向 NVIDIA 的 `--device`；
+- 指向 NVIDIA 设备的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；
 - HAMi Core 使用的环境变量，或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
 - 暴露 NVIDIA 设备，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
 - `io.hami.lite.*` 管理标签。
+
+`--env-file` 和 `--label-file` 只接受普通文件。CLI 在调用 Docker 前检查文件内容，包括 `--label-file` 中不含 `=` 的键。FIFO、设备文件和其他特殊文件会被拒绝。
 
 当前 PoC 不支持远端 Docker daemon、rootless Docker 或 musl 镜像，也不提供多容器容量账本、超售控制、调度、抢占、崩溃恢复或宿主机级安全隔离。多个容器的声明总量可能超过物理 GPU 容量，受信任的容器进程也可以绕过 `LD_PRELOAD`。这些场景应使用完整 HAMi 或 HAMi Enterprise。详细边界见 [架构说明](docs/architecture.md)。

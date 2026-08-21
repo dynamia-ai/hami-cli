@@ -42,6 +42,29 @@ type fakeDockerEndpoint struct {
 	called bool
 }
 
+type copyingSnapshotter struct {
+	directory string
+}
+
+func (snapshotter copyingSnapshotter) Snapshot(source *os.File) (*os.File, string, func(), error) {
+	if _, err := source.Seek(0, 0); err != nil {
+		return nil, "", nil, err
+	}
+	snapshot, err := os.CreateTemp(snapshotter.directory, "hami-core-*")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if _, err := snapshot.ReadFrom(source); err != nil {
+		_ = snapshot.Close()
+		return nil, "", nil, err
+	}
+	if _, err := snapshot.Seek(0, 0); err != nil {
+		_ = snapshot.Close()
+		return nil, "", nil, err
+	}
+	return snapshot, snapshot.Name(), func() { _ = snapshot.Close() }, nil
+}
+
 func (endpoint *fakeDockerEndpoint) ValidateLocal(context.Context) error {
 	endpoint.called = true
 	return endpoint.err
@@ -68,6 +91,16 @@ func testArtifact(t *testing.T) hamirun.Artifact {
 
 func testELFSharedObject(t *testing.T) []byte {
 	t.Helper()
+	return testELFImage(t, false)
+}
+
+func testELFPIE(t *testing.T) []byte {
+	t.Helper()
+	return testELFImage(t, true)
+}
+
+func testELFHeaderOnly(t *testing.T) []byte {
+	t.Helper()
 	header := make([]byte, 64)
 	copy(header, []byte{0x7f, 'E', 'L', 'F', byte(elfClass64), byte(elfDataLittleEndian), 1, 0})
 	binary.LittleEndian.PutUint16(header[16:], 3)  // ET_DYN
@@ -77,6 +110,48 @@ func testELFSharedObject(t *testing.T) []byte {
 	binary.LittleEndian.PutUint16(header[54:], 56) // program header entry size
 	binary.LittleEndian.PutUint16(header[58:], 64) // section header entry size
 	return bytes.Clone(header)
+}
+
+func testELFImage(t *testing.T, interpreter bool) []byte {
+	t.Helper()
+	const (
+		headerSize        = 64
+		programHeaderSize = 56
+		dynamicEntrySize  = 16
+	)
+	programCount := 2
+	if interpreter {
+		programCount++
+	}
+	dynamicOffset := headerSize + programCount*programHeaderSize
+	content := make([]byte, dynamicOffset+dynamicEntrySize)
+	copy(content, []byte{0x7f, 'E', 'L', 'F', byte(elfClass64), byte(elfDataLittleEndian), 1, 0})
+	binary.LittleEndian.PutUint16(content[16:], 3)  // ET_DYN
+	binary.LittleEndian.PutUint16(content[18:], 62) // EM_X86_64
+	binary.LittleEndian.PutUint32(content[20:], 1)  // EV_CURRENT
+	binary.LittleEndian.PutUint64(content[32:], headerSize)
+	binary.LittleEndian.PutUint16(content[52:], headerSize)
+	binary.LittleEndian.PutUint16(content[54:], programHeaderSize)
+	binary.LittleEndian.PutUint16(content[56:], uint16(programCount))
+	binary.LittleEndian.PutUint16(content[58:], 64)
+
+	writeProgramHeader := func(index int, programType, flags uint32, offset, size, alignment uint64) {
+		base := headerSize + index*programHeaderSize
+		binary.LittleEndian.PutUint32(content[base:], programType)
+		binary.LittleEndian.PutUint32(content[base+4:], flags)
+		binary.LittleEndian.PutUint64(content[base+8:], offset)
+		binary.LittleEndian.PutUint64(content[base+16:], offset)
+		binary.LittleEndian.PutUint64(content[base+24:], offset)
+		binary.LittleEndian.PutUint64(content[base+32:], size)
+		binary.LittleEndian.PutUint64(content[base+40:], size)
+		binary.LittleEndian.PutUint64(content[base+48:], alignment)
+	}
+	writeProgramHeader(0, 1, 5, 0, uint64(len(content)), 0x1000)            // PT_LOAD, PF_R|PF_X
+	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), dynamicEntrySize, 8) // PT_DYNAMIC, PF_R|PF_W
+	if interpreter {
+		writeProgramHeader(2, 3, 4, uint64(dynamicOffset), 1, 1) // PT_INTERP, PF_R
+	}
+	return content
 }
 
 const (
@@ -107,7 +182,7 @@ func TestInjectBuildsNVIDIAContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
-	joined := strings.Join(injection, "\n")
+	joined := strings.Join(injection.Args, "\n")
 	for _, want := range []string{
 		"--gpus\ndevice=0",
 		"dst=/usr/local/vgpu/libvgpu.so",
@@ -126,7 +201,7 @@ func TestInjectBuildsNVIDIAContract(t *testing.T) {
 			t.Errorf("injection missing %q:\n%s", want, joined)
 		}
 	}
-	if slices.Contains(injection, request.DockerArgs[2]) {
+	if slices.Contains(injection.Args, request.DockerArgs[2]) {
 		t.Fatalf("plugin injection contains user Docker option: %#v", injection)
 	}
 }
@@ -142,6 +217,8 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 		{name: "runtime", args: []string{"--runtime=runc", "image"}, want: "runtime"},
 		{name: "privileged", args: []string{"--privileged", "image"}, want: "--privileged"},
 		{name: "NVIDIA device", args: []string{"--device", "/dev/nvidia0", "image"}, want: "--device"},
+		{name: "NVIDIA device alias", args: []string{"--device", "/dev/char/195:1:/dev/altgpu", "image"}, want: "--device"},
+		{name: "NVIDIA device cgroup rule", args: []string{"--device-cgroup-rule", "c 195:* rmw", "image"}, want: "--device-cgroup-rule"},
 		{name: "environment", args: []string{"--env", "LD_PRELOAD=/bad.so", "image"}, want: "LD_PRELOAD"},
 		{name: "short environment", args: []string{"-eCUDA_DEVICE_SM_LIMIT=90", "image"}, want: "CUDA_DEVICE_SM_LIMIT"},
 		{name: "per-device environment", args: []string{"-e", "CUDA_DEVICE_MEMORY_LIMIT_0=1g", "image"}, want: "CUDA_DEVICE_MEMORY_LIMIT_0"},
@@ -176,6 +253,7 @@ func TestInjectInspectsEnvAndLabelFiles(t *testing.T) {
 		{name: "env file with BOM", flag: "--env-file", content: "\uFEFFLD_PRELOAD=/bad.so\n", want: "LD_PRELOAD"},
 		{name: "env file capabilities", flag: "--env-file", content: "NVIDIA_DRIVER_CAPABILITIES=compute\n", want: "compute and utility"},
 		{name: "label file", flag: "--label-file", content: "safe=true\nio.hami.lite.managed=false\n", want: "io.hami.lite.managed"},
+		{name: "label file bare key", flag: "--label-file", content: "safe=true\nio.hami.lite.managed\n", want: "io.hami.lite.managed"},
 		{name: "label file with BOM", flag: "--label-file", content: "\uFEFFio.hami.lite.managed=false\n", want: "io.hami.lite.managed"},
 	}
 	for _, test := range tests {
@@ -194,11 +272,21 @@ func TestInjectInspectsEnvAndLabelFiles(t *testing.T) {
 	}
 }
 
+func TestInjectRejectsNonRegularAssignmentFile(t *testing.T) {
+	t.Parallel()
+	request := testRequest(t, []string{"docker", "run", "--env-file", os.DevNull, "image"})
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("Inject() error = %v, want regular file rejection", err)
+	}
+}
+
 func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 	t.Parallel()
 	request := testRequest(t, []string{
 		"docker", "run", "--runtime=nvidia", "--privileged=false", "-i=false",
-		"--future-flag=value", "--device", "/dev/snd", "--env", "SAFE=value",
+		"--future-flag=value", "--device", os.DevNull, "--env", "SAFE=value",
+		"--device-cgroup-rule", "c 1:3 rw",
 		"--env", "NVIDIA_DRIVER_CAPABILITIES=all",
 		"--mount", "type=bind,src=/tmp,dst=/workspace", "image",
 		"program", "--env", "LD_PRELOAD=/command-argument", "--gpus", "literal",
@@ -235,6 +323,38 @@ func TestInjectRejectsNonELFCore(t *testing.T) {
 	}
 }
 
+func TestInjectRejectsHeaderOnlyELFCore(t *testing.T) {
+	t.Parallel()
+	request := testRequest(t, []string{"docker", "run", "image"})
+	content := testELFHeaderOnly(t)
+	request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "loadable shared library") {
+		t.Fatalf("Inject() error = %v, want loadable shared library rejection", err)
+	}
+}
+
+func TestInjectRejectsPIECore(t *testing.T) {
+	t.Parallel()
+	content := testELFPIE(t)
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.Core.Path = filepath.Join(t.TempDir(), "core-pie")
+	if err := os.WriteFile(request.Core.Path, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "PIE executable") {
+		t.Fatalf("Inject() error = %v, want PIE rejection", err)
+	}
+}
+
 func TestValidateDeviceRejectsEmptyGPUUUID(t *testing.T) {
 	t.Parallel()
 	if _, err := validateDevice("GPU-"); err == nil {
@@ -246,13 +366,18 @@ func TestInjectRunsHostGPUPreflightOutsideDryRun(t *testing.T) {
 	t.Parallel()
 	inspector := &fakeInspector{wantDevice: "GPU-abc"}
 	endpoint := &fakeDockerEndpoint{}
-	plugin := &Plugin{goos: "linux", goarch: "amd64", inspector: inspector, dockerEndpoint: endpoint}
+	plugin := &Plugin{
+		goos: "linux", goarch: "amd64", inspector: inspector, dockerEndpoint: endpoint,
+		snapshotter: copyingSnapshotter{directory: t.TempDir()},
+	}
 	request := testRequest(t, []string{"docker", "run", "image"})
 	request.Device = "GPU-abc"
 	request.DryRun = false
-	if _, err := plugin.Inject(t.Context(), request); err != nil {
+	injection, err := plugin.Inject(t.Context(), request)
+	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
+	defer injection.Close()
 	if !inspector.called {
 		t.Fatal("GPU inspector was not called")
 	}
@@ -265,7 +390,10 @@ func TestInjectRejectsRemoteDockerEndpoint(t *testing.T) {
 	t.Parallel()
 	endpoint := &fakeDockerEndpoint{err: fmt.Errorf("remote endpoint")}
 	inspector := &fakeInspector{wantDevice: "0"}
-	plugin := &Plugin{goos: "linux", goarch: "amd64", inspector: inspector, dockerEndpoint: endpoint}
+	plugin := &Plugin{
+		goos: "linux", goarch: "amd64", inspector: inspector, dockerEndpoint: endpoint,
+		snapshotter: copyingSnapshotter{directory: t.TempDir()},
+	}
 	request := testRequest(t, []string{"docker", "run", "image"})
 	request.DryRun = false
 	_, err := plugin.Inject(t.Context(), request)
@@ -274,6 +402,50 @@ func TestInjectRejectsRemoteDockerEndpoint(t *testing.T) {
 	}
 	if inspector.called {
 		t.Fatal("GPU inspector ran after Docker endpoint rejection")
+	}
+}
+
+func TestInjectPinsVerifiedCoreForExecution(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	plugin := &Plugin{
+		goos: "linux", goarch: "amd64",
+		inspector:      &fakeInspector{wantDevice: "0"},
+		dockerEndpoint: &fakeDockerEndpoint{},
+		snapshotter:    copyingSnapshotter{directory: directory},
+	}
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.DryRun = false
+	original, err := os.ReadFile(request.Core.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injection, err := plugin.Inject(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	defer injection.Close()
+
+	var snapshotPath string
+	for _, argument := range injection.Args {
+		for _, field := range strings.Split(argument, ",") {
+			if strings.HasPrefix(field, "src=") {
+				snapshotPath = strings.TrimPrefix(field, "src=")
+			}
+		}
+	}
+	if snapshotPath == "" || snapshotPath == request.Core.Path {
+		t.Fatalf("Core mount source = %q, want pinned path distinct from %q", snapshotPath, request.Core.Path)
+	}
+	if err := os.WriteFile(request.Core.Path, []byte("replaced after verification"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("pinned Core bytes changed after the original path was replaced")
 	}
 }
 

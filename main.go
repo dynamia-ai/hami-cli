@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/dynamia-ai/hami-cli/nvidia"
 	hamirun "github.com/dynamia-ai/hami-cli/run"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -60,6 +61,9 @@ const (
 )
 
 func main() {
+	if nvidia.RunArtifactCleanupFromEnvironment() {
+		return
+	}
 	options := &commandOptions{
 		out:      os.Stdout,
 		errOut:   os.Stderr,

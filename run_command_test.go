@@ -35,8 +35,8 @@ type commandTestPlugin struct{}
 
 func (commandTestPlugin) Name() string { return "test" }
 
-func (commandTestPlugin) Inject(_ context.Context, request hamirun.Request) ([]string, error) {
-	return []string{"--env", "RESOURCE=" + request.Memory}, nil
+func (commandTestPlugin) Inject(_ context.Context, request hamirun.Request) (hamirun.Injection, error) {
+	return hamirun.Injection{Args: []string{"--env", "RESOURCE=" + request.Memory}}, nil
 }
 
 type commandTestRunner struct {
@@ -106,14 +106,7 @@ func TestRunCommandExecutesPreparedArgv(t *testing.T) {
 
 func TestRunCommandNVIDIADryRun(t *testing.T) {
 	t.Parallel()
-	header := make([]byte, 64)
-	copy(header, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0})
-	binary.LittleEndian.PutUint16(header[16:], 3)  // ET_DYN
-	binary.LittleEndian.PutUint16(header[18:], 62) // EM_X86_64
-	binary.LittleEndian.PutUint32(header[20:], 1)  // EV_CURRENT
-	binary.LittleEndian.PutUint16(header[52:], 64)
-	binary.LittleEndian.PutUint16(header[54:], 56)
-	binary.LittleEndian.PutUint16(header[58:], 64)
+	header := testRunCommandELFSharedObject()
 	corePath := filepath.Join(t.TempDir(), "libvgpu.so")
 	if err := os.WriteFile(corePath, header, 0o600); err != nil {
 		t.Fatalf("write test Core: %v", err)
@@ -140,4 +133,39 @@ func TestRunCommandNVIDIADryRun(t *testing.T) {
 			t.Errorf("dry-run output missing %q:\n%s", want, output.String())
 		}
 	}
+}
+
+func testRunCommandELFSharedObject() []byte {
+	const (
+		headerSize        = 64
+		programHeaderSize = 56
+		dynamicEntrySize  = 16
+		programCount      = 2
+	)
+	dynamicOffset := headerSize + programCount*programHeaderSize
+	content := make([]byte, dynamicOffset+dynamicEntrySize)
+	copy(content, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0})
+	binary.LittleEndian.PutUint16(content[16:], 3)  // ET_DYN
+	binary.LittleEndian.PutUint16(content[18:], 62) // EM_X86_64
+	binary.LittleEndian.PutUint32(content[20:], 1)  // EV_CURRENT
+	binary.LittleEndian.PutUint64(content[32:], headerSize)
+	binary.LittleEndian.PutUint16(content[52:], headerSize)
+	binary.LittleEndian.PutUint16(content[54:], programHeaderSize)
+	binary.LittleEndian.PutUint16(content[56:], programCount)
+	binary.LittleEndian.PutUint16(content[58:], 64)
+
+	writeProgramHeader := func(index int, programType, flags uint32, offset, size, alignment uint64) {
+		base := headerSize + index*programHeaderSize
+		binary.LittleEndian.PutUint32(content[base:], programType)
+		binary.LittleEndian.PutUint32(content[base+4:], flags)
+		binary.LittleEndian.PutUint64(content[base+8:], offset)
+		binary.LittleEndian.PutUint64(content[base+16:], offset)
+		binary.LittleEndian.PutUint64(content[base+24:], offset)
+		binary.LittleEndian.PutUint64(content[base+32:], size)
+		binary.LittleEndian.PutUint64(content[base+40:], size)
+		binary.LittleEndian.PutUint64(content[base+48:], alignment)
+	}
+	writeProgramHeader(0, 1, 5, 0, uint64(len(content)), 0x1000)
+	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), dynamicEntrySize, 8)
+	return content
 }

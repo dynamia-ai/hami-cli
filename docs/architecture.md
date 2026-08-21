@@ -25,7 +25,8 @@ NVIDIA PoC 已实现以下共享合同：
 - 只接受 `--` 后的完整 `docker run` argv，不拼接 shell 字符串；
 - 在 `docker run` 后注入参数，保留用户 argv 的值和相对顺序；
 - 校验 Core 版本和 SHA-256 摘要；
-- 校验 Core 是 Linux/AMD64 使用的 ELF64 x86-64 共享对象；
+- 校验 Core 是 Linux/AMD64 使用的可加载 ELF64 x86-64 共享库；
+- 真实执行时，固定并挂载通过校验的 Core 字节快照；
 - 检测会覆盖 GPU、Core 环境变量、挂载路径和管理标签的 Docker 参数；
 - `--dry-run` 输出经过 POSIX shell quoting 的可复制命令；
 - 实际执行通过 `exec` 替换当前进程，保留 Docker 的标准输入输出、退出码和信号。
@@ -69,7 +70,11 @@ NVIDIA 插件当前使用以下参数：
 - 检测会破坏 Core 注入合同的 Docker 参数冲突；
 - 提供厂商特有的诊断信息。
 
-NVIDIA 插件在实际执行前确认当前 Docker context 使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。插件把 `libvgpu.so` 只读挂载到 `/usr/local/vgpu/libvgpu.so`，设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
+NVIDIA 插件在实际执行前确认当前 Docker context 使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的私有临时目录，再从同一个只读快照完成 SHA-256 和 ELF 校验。Docker 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。清理辅助进程通过继承的生命周期管道等待 Docker 客户端退出，随后删除快照目录。dry-run 不创建快照；输出引用调用时校验的原始路径。
+
+插件设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
+
+Docker 参数检查会拒绝直接或通过设备 cgroup 规则授权 NVIDIA 字符设备的配置。`--env-file` 和 `--label-file` 必须引用普通文件；插件在读取文件前拒绝 FIFO、设备文件和其他特殊文件，并检查 label 文件中的裸键。
 
 插件不负责本机容量账本、多容器调度、超售控制、抢占或崩溃恢复。这些能力属于 HAMi 或 HAMi Enterprise 控制面。
 

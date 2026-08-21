@@ -36,8 +36,8 @@ type fakePlugin struct {
 
 func (plugin fakePlugin) Name() string { return plugin.name }
 
-func (plugin fakePlugin) Inject(_ context.Context, _ Request) ([]string, error) {
-	return plugin.injection, plugin.err
+func (plugin fakePlugin) Inject(_ context.Context, _ Request) (Injection, error) {
+	return Injection{Args: plugin.injection}, plugin.err
 }
 
 type fakeRunner struct {
@@ -57,18 +57,41 @@ func TestPreparePreservesDockerArgv(t *testing.T) {
 		"pytorch/pytorch:latest", "python", "train.py", "--message", "it's exact", "",
 	}
 	injection := []string{"--env", "HAMi=value with spaces", "--label", "io.hami.test=true"}
-	got, err := Prepare(t.Context(), "test", []Plugin{fakePlugin{name: "test", injection: injection}}, Request{DockerArgs: original})
+	prepared, err := Prepare(t.Context(), "test", []Plugin{fakePlugin{name: "test", injection: injection}}, Request{DockerArgs: original})
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
+	defer prepared.Close()
 	want := append([]string{"docker", "run"}, injection...)
 	want = append(want, original[2:]...)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Prepare() = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(prepared.Argv, want) {
+		t.Fatalf("Prepare() = %#v, want %#v", prepared.Argv, want)
 	}
-	if !reflect.DeepEqual(got[len(injection)+2:], original[2:]) {
-		t.Fatalf("user argv changed: got %#v, want %#v", got[len(injection)+2:], original[2:])
+	if !reflect.DeepEqual(prepared.Argv[len(injection)+2:], original[2:]) {
+		t.Fatalf("user argv changed: got %#v, want %#v", prepared.Argv[len(injection)+2:], original[2:])
 	}
+}
+
+func TestExecuteCleansUpPreparedResources(t *testing.T) {
+	t.Parallel()
+	cleaned := false
+	plugin := cleanupPlugin{cleanup: func() { cleaned = true }}
+	if err := Execute(t.Context(), &bytes.Buffer{}, &fakeRunner{}, "test", []Plugin{plugin}, Request{DockerArgs: []string{"docker", "run", "image"}}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !cleaned {
+		t.Fatal("Execute() did not clean up retained plugin resources after runner returned")
+	}
+}
+
+type cleanupPlugin struct {
+	cleanup func()
+}
+
+func (cleanupPlugin) Name() string { return "test" }
+
+func (plugin cleanupPlugin) Inject(context.Context, Request) (Injection, error) {
+	return Injection{Cleanup: plugin.cleanup}, nil
 }
 
 func TestPrepareRejectsInvalidCommandAndVendor(t *testing.T) {

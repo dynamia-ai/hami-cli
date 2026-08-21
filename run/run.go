@@ -51,7 +51,34 @@ type Request struct {
 // Plugin contributes vendor-specific Docker run arguments.
 type Plugin interface {
 	Name() string
-	Inject(context.Context, Request) ([]string, error)
+	Inject(context.Context, Request) (Injection, error)
+}
+
+// Injection contains vendor arguments and resources that must remain alive
+// until Docker has consumed the prepared command.
+type Injection struct {
+	Args    []string
+	Cleanup func()
+}
+
+// Close releases resources retained by the injection.
+func (injection *Injection) Close() {
+	if injection.Cleanup == nil {
+		return
+	}
+	injection.Cleanup()
+	injection.Cleanup = nil
+}
+
+// PreparedCommand is a Docker argv plus resources retained until execution.
+type PreparedCommand struct {
+	Argv      []string
+	injection Injection
+}
+
+// Close releases resources retained during command preparation.
+func (command *PreparedCommand) Close() {
+	command.injection.Close()
 }
 
 // Runner replaces the current process with the prepared Docker command.
@@ -78,7 +105,7 @@ func (ExecRunner) Exec(_ context.Context, argv []string) error {
 // Prepare validates the shared command contract and inserts plugin arguments
 // immediately after "docker run" without changing the user's argv values or
 // relative order.
-func Prepare(ctx context.Context, vendor string, plugins []Plugin, request Request) ([]string, error) {
+func Prepare(ctx context.Context, vendor string, plugins []Plugin, request Request) (*PreparedCommand, error) {
 	if len(request.DockerArgs) < 3 || request.DockerArgs[0] != "docker" || request.DockerArgs[1] != "run" {
 		return nil, errors.New("command after -- must match: docker run [OPTIONS] IMAGE [COMMAND] [ARG...]")
 	}
@@ -102,29 +129,30 @@ func Prepare(ctx context.Context, vendor string, plugins []Plugin, request Reque
 		return nil, fmt.Errorf("unsupported vendor %q (available: %s)", vendor, strings.Join(available, ", "))
 	}
 
-	injected, err := selected.Inject(ctx, request)
+	injection, err := selected.Inject(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("prepare %s runtime: %w", vendor, err)
 	}
-	argv := make([]string, 0, len(request.DockerArgs)+len(injected))
+	argv := make([]string, 0, len(request.DockerArgs)+len(injection.Args))
 	argv = append(argv, request.DockerArgs[:2]...)
-	argv = append(argv, injected...)
+	argv = append(argv, injection.Args...)
 	argv = append(argv, request.DockerArgs[2:]...)
-	return argv, nil
+	return &PreparedCommand{Argv: argv, injection: injection}, nil
 }
 
 // Execute prepares the command, prints it for dry runs, or replaces the current
 // process through runner.
 func Execute(ctx context.Context, out io.Writer, runner Runner, vendor string, plugins []Plugin, request Request) error {
-	argv, err := Prepare(ctx, vendor, plugins, request)
+	prepared, err := Prepare(ctx, vendor, plugins, request)
 	if err != nil {
 		return err
 	}
+	defer prepared.Close()
 	if request.DryRun {
-		_, err := fmt.Fprintln(out, ShellQuote(argv))
+		_, err := fmt.Fprintln(out, ShellQuote(prepared.Argv))
 		return err
 	}
-	return runner.Exec(ctx, argv)
+	return runner.Exec(ctx, prepared.Argv)
 }
 
 // ShellQuote formats argv as one POSIX-shell command without changing any

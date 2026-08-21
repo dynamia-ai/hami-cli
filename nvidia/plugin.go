@@ -46,6 +46,7 @@ const (
 	stateContainerPath = "/tmp/hami-lite"
 	lockContainerPath  = "/tmp/vgpulock"
 	cacheContainerPath = stateContainerPath + "/cudevshr.cache"
+	nvidiaDeviceMajor  = 195
 )
 
 var (
@@ -70,12 +71,19 @@ type dockerEndpointInspector interface {
 	ValidateLocal(context.Context) error
 }
 
+type artifactSnapshotter interface {
+	Snapshot(*os.File) (*os.File, string, func(), error)
+}
+
+type systemArtifactSnapshotter struct{}
+
 // Plugin injects the community HAMi Core into one Docker container.
 type Plugin struct {
 	goos           string
 	goarch         string
 	inspector      gpuInspector
 	dockerEndpoint dockerEndpointInspector
+	snapshotter    artifactSnapshotter
 }
 
 // New creates the NVIDIA plugin using the local Linux host for runtime checks.
@@ -85,6 +93,7 @@ func New() *Plugin {
 		goarch:         runtime.GOARCH,
 		inspector:      nvidiaSMIInspector{},
 		dockerEndpoint: dockerContextInspector{},
+		snapshotter:    systemArtifactSnapshotter{},
 	}
 }
 
@@ -92,36 +101,41 @@ func New() *Plugin {
 func (*Plugin) Name() string { return "nvidia" }
 
 // Inject implements run.Plugin.
-func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) ([]string, error) {
+func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hamirun.Injection, error) {
 	device, err := validateDevice(request.Device)
 	if err != nil {
-		return nil, err
+		return hamirun.Injection{}, err
 	}
 	memoryBytes, err := parseMemory(request.Memory)
 	if err != nil {
-		return nil, err
+		return hamirun.Injection{}, err
 	}
 	if request.Compute < 1 || request.Compute > 100 {
-		return nil, fmt.Errorf("--compute must be between 1 and 100, got %d", request.Compute)
-	}
-	corePath, coreVersion, coreDigest, err := verifyArtifact(request.Core)
-	if err != nil {
-		return nil, err
+		return hamirun.Injection{}, fmt.Errorf("--compute must be between 1 and 100, got %d", request.Compute)
 	}
 	if err := validateDockerOptions(request.DockerArgs[2:]); err != nil {
-		return nil, err
+		return hamirun.Injection{}, err
 	}
 
 	if !request.DryRun {
 		if plugin.goos != "linux" || plugin.goarch != "amd64" {
-			return nil, fmt.Errorf("NVIDIA runtime requires linux/amd64, current platform is %s/%s", plugin.goos, plugin.goarch)
+			return hamirun.Injection{}, fmt.Errorf("NVIDIA runtime requires linux/amd64, current platform is %s/%s", plugin.goos, plugin.goarch)
 		}
 		if err := plugin.dockerEndpoint.ValidateLocal(ctx); err != nil {
-			return nil, err
+			return hamirun.Injection{}, err
 		}
 		if err := plugin.inspector.Validate(ctx, device); err != nil {
-			return nil, err
+			return hamirun.Injection{}, err
 		}
+	}
+
+	var snapshotter artifactSnapshotter
+	if !request.DryRun {
+		snapshotter = plugin.snapshotter
+	}
+	corePath, coreVersion, coreDigest, cleanup, err := verifyArtifact(request.Core, snapshotter)
+	if err != nil {
+		return hamirun.Injection{}, err
 	}
 
 	bindMount, err := mountValue(
@@ -131,10 +145,13 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) ([]st
 		"readonly",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("format Core bind mount: %w", err)
+		if cleanup != nil {
+			cleanup()
+		}
+		return hamirun.Injection{}, fmt.Errorf("format Core bind mount: %w", err)
 	}
 
-	return []string{
+	return hamirun.Injection{Args: []string{
 		"--gpus", "device=" + device,
 		"--mount", bindMount,
 		"--mount", "type=tmpfs,dst=" + stateContainerPath + ",tmpfs-mode=1777",
@@ -149,7 +166,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) ([]st
 		"--label", "io.hami.lite.vendor=nvidia",
 		"--label", "io.hami.lite.core.version=" + coreVersion,
 		"--label", "io.hami.lite.core.sha256=" + coreDigest,
-	}, nil
+	}, Cleanup: cleanup}, nil
 }
 
 func validateDevice(value string) (string, error) {
@@ -202,55 +219,141 @@ func parseMemory(value string) (uint64, error) {
 	return quantity * multiplier, nil
 }
 
-func verifyArtifact(artifact hamirun.Artifact) (string, string, string, error) {
+func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) (string, string, string, func(), error) {
 	version := strings.TrimSpace(artifact.Version)
 	if version == "" || strings.IndexFunc(version, unicode.IsControl) >= 0 {
-		return "", "", "", errors.New("--core-version must identify the Core artifact")
+		return "", "", "", nil, errors.New("--core-version must identify the Core artifact")
 	}
 	wantDigest := strings.ToLower(strings.TrimSpace(artifact.SHA256))
 	wantDigest = strings.TrimPrefix(wantDigest, "sha256:")
 	if len(wantDigest) != sha256.Size*2 || strings.IndexFunc(wantDigest, func(r rune) bool {
 		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'))
 	}) >= 0 {
-		return "", "", "", errors.New("--core-sha256 must be a 64-character SHA-256 digest")
+		return "", "", "", nil, errors.New("--core-sha256 must be a 64-character SHA-256 digest")
 	}
 
 	absPath, err := filepath.Abs(artifact.Path)
 	if err != nil {
-		return "", "", "", fmt.Errorf("resolve --core path: %w", err)
+		return "", "", "", nil, fmt.Errorf("resolve --core path: %w", err)
 	}
-	info, err := os.Stat(absPath)
+	source, err := os.Open(absPath)
 	if err != nil {
-		return "", "", "", fmt.Errorf("stat Core artifact %q: %w", absPath, err)
+		return "", "", "", nil, fmt.Errorf("open Core artifact %q: %w", absPath, err)
+	}
+	info, err := source.Stat()
+	if err != nil {
+		_ = source.Close()
+		return "", "", "", nil, fmt.Errorf("stat Core artifact %q: %w", absPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", "", "", fmt.Errorf("Core artifact %q is not a regular file", absPath)
+		_ = source.Close()
+		return "", "", "", nil, fmt.Errorf("Core artifact %q is not a regular file", absPath)
 	}
-	file, err := os.Open(absPath)
-	if err != nil {
-		return "", "", "", fmt.Errorf("open Core artifact %q: %w", absPath, err)
+
+	candidate := source
+	mountPath := absPath
+	cleanup := func() { _ = source.Close() }
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			cleanup()
+		}
+	}()
+	if snapshotter != nil {
+		snapshot, snapshotPath, snapshotCleanup, err := snapshotter.Snapshot(source)
+		if err != nil {
+			return "", "", "", nil, fmt.Errorf("pin Core artifact %q: %w", absPath, err)
+		}
+		_ = source.Close()
+		candidate = snapshot
+		mountPath = snapshotPath
+		cleanup = snapshotCleanup
+		info, err = snapshot.Stat()
+		if err != nil {
+			return "", "", "", nil, fmt.Errorf("stat pinned Core artifact %q: %w", absPath, err)
+		}
 	}
-	defer file.Close()
+	if _, err := candidate.Seek(0, io.SeekStart); err != nil {
+		return "", "", "", nil, fmt.Errorf("seek Core artifact %q: %w", absPath, err)
+	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", "", "", fmt.Errorf("hash Core artifact %q: %w", absPath, err)
+	if _, err := io.Copy(hash, candidate); err != nil {
+		return "", "", "", nil, fmt.Errorf("hash Core artifact %q: %w", absPath, err)
 	}
 	gotDigest := fmt.Sprintf("%x", hash.Sum(nil))
 	if gotDigest != wantDigest {
-		return "", "", "", fmt.Errorf("Core artifact SHA-256 mismatch: got %s, want %s", gotDigest, wantDigest)
+		return "", "", "", nil, fmt.Errorf("Core artifact SHA-256 mismatch: got %s, want %s", gotDigest, wantDigest)
 	}
-	core, err := elf.Open(absPath)
+	core, err := elf.NewFile(io.NewSectionReader(candidate, 0, info.Size()))
 	if err != nil {
-		return "", "", "", fmt.Errorf("Core artifact %q is not an ELF shared library: %w", absPath, err)
+		return "", "", "", nil, fmt.Errorf("Core artifact %q is not an ELF shared library: %w", absPath, err)
 	}
 	defer core.Close()
 	if core.Class != elf.ELFCLASS64 || core.Data != elf.ELFDATA2LSB || core.Machine != elf.EM_X86_64 || core.Type != elf.ET_DYN {
-		return "", "", "", fmt.Errorf(
+		return "", "", "", nil, fmt.Errorf(
 			"Core artifact %q must be a little-endian ELF64 x86-64 shared object, got class=%s data=%s machine=%s type=%s",
 			absPath, core.Class, core.Data, core.Machine, core.Type,
 		)
 	}
-	return absPath, version, gotDigest, nil
+	if err := validateLoadableSharedLibrary(core); err != nil {
+		return "", "", "", nil, fmt.Errorf("Core artifact %q must be a loadable shared library: %w", absPath, err)
+	}
+	if snapshotter == nil {
+		return mountPath, version, gotDigest, nil, nil
+	}
+	keepOpen = true
+	return mountPath, version, gotDigest, cleanup, nil
+}
+
+func validateLoadableSharedLibrary(core *elf.File) error {
+	loadSegments := make([]*elf.Prog, 0)
+	hasExecutableLoad := false
+	var dynamicSegment *elf.Prog
+	for _, program := range core.Progs {
+		switch program.Type {
+		case elf.PT_INTERP:
+			return errors.New("ELF contains a program interpreter and is a PIE executable")
+		case elf.PT_LOAD:
+			if program.Filesz > 0 && program.Memsz >= program.Filesz {
+				loadSegments = append(loadSegments, program)
+				hasExecutableLoad = hasExecutableLoad || program.Flags&elf.PF_X != 0
+			}
+		case elf.PT_DYNAMIC:
+			if dynamicSegment != nil {
+				return errors.New("ELF contains multiple dynamic segments")
+			}
+			dynamicSegment = program
+		}
+	}
+	if !hasExecutableLoad {
+		return errors.New("ELF has no executable load segment")
+	}
+	if dynamicSegment == nil || dynamicSegment.Filesz < 16 || dynamicSegment.Filesz%16 != 0 {
+		return errors.New("ELF has no valid dynamic segment")
+	}
+	contained := false
+	for _, load := range loadSegments {
+		if dynamicSegment.Off >= load.Off && dynamicSegment.Off-load.Off <= load.Filesz &&
+			dynamicSegment.Filesz <= load.Filesz-(dynamicSegment.Off-load.Off) {
+			contained = true
+			break
+		}
+	}
+	if !contained {
+		return errors.New("ELF dynamic segment is not contained in a load segment")
+	}
+
+	reader := dynamicSegment.Open()
+	entry := make([]byte, 16)
+	for offset := uint64(0); offset < dynamicSegment.Filesz; offset += uint64(len(entry)) {
+		if _, err := io.ReadFull(reader, entry); err != nil {
+			return fmt.Errorf("read ELF dynamic segment: %w", err)
+		}
+		if elf.DynTag(int64(core.ByteOrder.Uint64(entry[:8]))) == elf.DT_NULL {
+			return nil
+		}
+	}
+	return errors.New("ELF dynamic segment has no DT_NULL terminator")
 }
 
 type dockerOption struct {
@@ -280,8 +383,12 @@ func validateDockerOptions(args []string) error {
 				return errors.New("Docker option --privileged conflicts with single-GPU device isolation")
 			}
 		case "--device":
-			if strings.Contains(strings.ToLower(option.value), "nvidia") {
-				return fmt.Errorf("Docker option --device=%q conflicts with HAMi GPU selection", option.value)
+			if err := validateDockerDevice(option.value); err != nil {
+				return err
+			}
+		case "--device-cgroup-rule":
+			if err := validateDeviceCgroupRule(option.value); err != nil {
+				return err
 			}
 		case "--env":
 			if err := validateEnvironmentAssignment(option.value); err != nil {
@@ -320,6 +427,77 @@ func validateDockerOptions(args []string) error {
 		}
 	}
 	return nil
+}
+
+func validateDockerDevice(value string) error {
+	parts := strings.SplitN(value, ":", 4)
+	if len(parts) == 4 || parts[0] == "" {
+		return fmt.Errorf("cannot safely inspect Docker option --device=%q", value)
+	}
+	if strings.Contains(strings.ToLower(value), "nvidia") {
+		return fmt.Errorf("Docker option --device=%q conflicts with HAMi GPU selection", value)
+	}
+	source := parts[0]
+	if !filepath.IsAbs(source) {
+		return fmt.Errorf("cannot safely inspect Docker option --device source %q", source)
+	}
+	isNVIDIADevice, err := inspectDockerDeviceSource(source)
+	if err != nil {
+		return fmt.Errorf("inspect Docker option --device source %q: %w", source, err)
+	}
+	if isNVIDIADevice {
+		return fmt.Errorf("Docker option --device=%q grants NVIDIA device major %d and conflicts with HAMi GPU selection", value, nvidiaDeviceMajor)
+	}
+	return nil
+}
+
+func validateDeviceCgroupRule(value string) error {
+	fields := strings.Fields(value)
+	if len(fields) != 3 {
+		return fmt.Errorf("cannot safely inspect Docker option --device-cgroup-rule=%q", value)
+	}
+	deviceType := fields[0]
+	major, minor, found := strings.Cut(fields[1], ":")
+	if !found || !validDeviceNumber(major) || !validDeviceNumber(minor) || !validDevicePermissions(fields[2]) {
+		return fmt.Errorf("cannot safely inspect Docker option --device-cgroup-rule=%q", value)
+	}
+	if deviceType == "a" || (deviceType == "c" && (major == "*" || deviceNumberEquals(major, nvidiaDeviceMajor))) {
+		return fmt.Errorf("Docker option --device-cgroup-rule=%q can grant NVIDIA devices and conflicts with HAMi GPU selection", value)
+	}
+	if deviceType != "b" && deviceType != "c" {
+		return fmt.Errorf("cannot safely inspect Docker option --device-cgroup-rule=%q", value)
+	}
+	return nil
+}
+
+func validDeviceNumber(value string) bool {
+	if value == "*" {
+		return true
+	}
+	_, err := strconv.ParseUint(value, 10, 32)
+	return err == nil
+}
+
+func deviceNumberEquals(value string, want uint32) bool {
+	number, err := strconv.ParseUint(value, 10, 32)
+	return err == nil && uint32(number) == want
+}
+
+func validDevicePermissions(value string) bool {
+	if value == "" {
+		return false
+	}
+	seen := make(map[rune]struct{}, len(value))
+	for _, permission := range value {
+		if !strings.ContainsRune("rwm", permission) {
+			return false
+		}
+		if _, duplicate := seen[permission]; duplicate {
+			return false
+		}
+		seen[permission] = struct{}{}
+	}
+	return true
 }
 
 func booleanOptionEnabled(option dockerOption) (bool, error) {
@@ -403,7 +581,7 @@ func validateAssignmentFile(filename string, lookup func(string) (string, bool),
 // parseAssignmentFile mirrors Docker CLI's line-delimited kvfile contract so
 // conflict detection sees the same keys Docker will pass to the daemon.
 func parseAssignmentFile(filename string, lookup func(string) (string, bool)) ([]string, error) {
-	file, err := os.Open(filename)
+	file, err := openRegularAssignmentFile(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -434,6 +612,10 @@ func parseAssignmentFile(filename string, lookup func(string) (string, bool)) ([
 		}
 		if hasValue {
 			assignments = append(assignments, key+"="+value)
+			continue
+		}
+		if lookup == nil {
+			assignments = append(assignments, key)
 			continue
 		}
 		if lookup != nil {
