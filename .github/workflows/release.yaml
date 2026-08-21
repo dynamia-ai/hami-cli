@@ -82,8 +82,8 @@ jobs:
     steps:
       - name: Require private module token
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
-        run: test -n "$PRIVATE_MODULES_TOKEN"
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
 
       - name: Checkout exact tagged revision
         uses: actions/checkout@v7
@@ -108,7 +108,7 @@ jobs:
       - name: Run local CI contract
         env:
           GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.PRIVATE_MODULES_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
@@ -120,8 +120,8 @@ jobs:
     steps:
       - name: Require private module token
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
-        run: test -n "$PRIVATE_MODULES_TOKEN"
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
 
       - name: Checkout exact tagged revision
         uses: actions/checkout@v7
@@ -140,7 +140,7 @@ jobs:
       - name: Build release archives
         env:
           GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.PRIVATE_MODULES_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
         run: |
           make package-release \
@@ -173,8 +173,8 @@ jobs:
     steps:
       - name: Require private module token
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
-        run: test -n "$PRIVATE_MODULES_TOKEN"
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
 
       - name: Checkout exact tagged revision
         uses: actions/checkout@v7
@@ -269,7 +269,7 @@ jobs:
             REVISION=${{ github.sha }}
             BUILD_DATE=${{ needs.validate.outputs.build-date }}
           secrets: |
-            github_token=${{ secrets.PRIVATE_MODULES_TOKEN }}
+            github_token=${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

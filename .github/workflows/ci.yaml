@@ -26,8 +26,8 @@ jobs:
     steps:
       - name: Require private module token
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
-        run: test -n "$PRIVATE_MODULES_TOKEN"
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
 
       - name: Checkout source
         uses: actions/checkout@v7
@@ -51,7 +51,7 @@ jobs:
       - name: Run local CI contract
         env:
           GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.PRIVATE_MODULES_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
@@ -75,8 +75,8 @@ jobs:
     steps:
       - name: Require private module token
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
-        run: test -n "$PRIVATE_MODULES_TOKEN"
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
 
       - name: Checkout source
         uses: actions/checkout@v7
@@ -89,7 +89,7 @@ jobs:
 
       - name: Build and load without publishing
         env:
-          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
         run: make build-image
 
       - name: Inspect and smoke-test image

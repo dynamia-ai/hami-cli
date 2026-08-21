@@ -89,7 +89,7 @@ Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和�
 
 仓库需要配置以下 Actions secrets：
 
-- `PRIVATE_MODULES_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
+- `HAMI_ENTERPRISE_REPO_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
 - `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要列举、读取和写入对象，并能设置对象 ACL。
 - `ALIYUN_OSS_ENDPOINT`：可选；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。
 
