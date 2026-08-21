@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,6 +81,8 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		newPoolCommand(options),
 		newDeviceCommand(options),
 		newBindingCommand(options),
+		newBindCommand(options),
+		newUnbindCommand(options),
 		newApplyCommand(options),
 		newVersionCommand(options),
 	)
@@ -295,7 +298,7 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 
 func newBindingCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{Use: "binding", Short: "Manage namespace access to ResourcePools"}
-	command.AddCommand(newBindingListCommand(options), newBindCommand(options), newUnbindCommand(options))
+	command.AddCommand(newBindingListCommand(options))
 	return command
 }
 
@@ -715,7 +718,7 @@ func decodeResourcePoolObject(raw []byte) (client.Object, error) {
 	default:
 		return nil, fmt.Errorf("unsupported kind %q", typeMeta.Kind)
 	}
-	if err := json.Unmarshal(raw, object); err != nil {
+	if err := decodeObject(raw, object, typeMeta.Kind != "ResourcePool"); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", typeMeta.Kind, err)
 	}
 	switch typed := object.(type) {
@@ -729,4 +732,21 @@ func decodeResourcePoolObject(raw []byte) (client.Object, error) {
 	}
 	object.GetObjectKind().SetGroupVersionKind(schema.FromAPIVersionAndKind(typeMeta.APIVersion, typeMeta.Kind))
 	return object, nil
+}
+
+func decodeObject(raw []byte, object client.Object, strict bool) error {
+	if !strict {
+		return json.Unmarshal(raw, object)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(object); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err == nil {
+		return errors.New("unexpected trailing JSON value")
+	} else if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("decode trailing data: %w", err)
+	}
+	return nil
 }

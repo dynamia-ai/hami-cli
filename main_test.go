@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -193,6 +195,66 @@ func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 	}
 }
 
+func TestBindAndUnbindAreRootCommands(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	newOptions := func() *commandOptions {
+		overrides := &clientcmd.ConfigOverrides{}
+		rawConfig := clientcmdapi.Config{
+			CurrentContext: "test",
+			Contexts: map[string]*clientcmdapi.Context{
+				"test": {Namespace: "team-a"},
+			},
+		}
+		return &commandOptions{
+			overrides:    overrides,
+			clientConfig: clientcmd.NewDefaultClientConfig(rawConfig, overrides),
+			client:       cli,
+			out:          &bytes.Buffer{},
+			errOut:       &bytes.Buffer{},
+		}
+	}
+
+	command := newRootCommand(newOptions())
+	command.SetArgs([]string{"bind", "--namespace", "team-a", "--pool", "training-a"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("root bind error = %v", err)
+	}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{}
+	key := client.ObjectKey{Name: "training-a", Namespace: "team-a"}
+	if err := cli.Get(t.Context(), key, binding); err != nil {
+		t.Fatalf("get created binding: %v", err)
+	}
+
+	command = newRootCommand(newOptions())
+	command.SetArgs([]string{"unbind", "--namespace", "team-a", "--pool", "training-a"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("root unbind error = %v", err)
+	}
+	if err := cli.Get(t.Context(), key, binding); !apierrors.IsNotFound(err) {
+		t.Fatalf("get deleted binding error = %v, want NotFound", err)
+	}
+
+	command = newRootCommand(newOptions())
+	command.SetArgs([]string{"binding", "bind", "--pool", "training-a"})
+	if err := command.Execute(); err == nil {
+		t.Fatal("nested binding bind succeeded, want rejected route")
+	}
+	bindingCommand, _, err := newRootCommand(newOptions()).Find([]string{"binding"})
+	if err != nil {
+		t.Fatalf("find binding command: %v", err)
+	}
+	for _, child := range bindingCommand.Commands() {
+		if child.Name() == "bind" || child.Name() == "unbind" {
+			t.Fatalf("binding child %q remains registered", child.Name())
+		}
+	}
+}
+
 func TestDefaultApplyNamespace(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -322,6 +384,93 @@ func TestDecodeResourcePoolObjectAddsManagedLabels(t *testing.T) {
 	}
 	if binding.Labels[resourcepoolv1alpha1.PoolLabel] != "training-a" {
 		t.Fatalf("binding managed labels = %v", binding.Labels)
+	}
+}
+
+func TestDecodeResourcePoolObjectRejectsUnknownTypedFields(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "GPUDevice",
+			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolReff":{"name":"training-a"}}}`,
+		},
+		{
+			name: "ResourcePoolBinding",
+			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePoolBinding","metadata":{"name":"training-a","namespace":"team-a"},"spec":{"poolReff":{"name":"training-a"}}}`,
+		},
+		{
+			name: "nested pool reference",
+			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolRef":{"name":"training-a","naem":"training-b"}}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodeResourcePoolObject([]byte(test.raw))
+			if err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("decodeResourcePoolObject() error = %v, want unknown field rejection", err)
+			}
+		})
+	}
+}
+
+func TestApplyRejectsUnknownGPUDeviceYAMLField(t *testing.T) {
+	t.Parallel()
+	manifest := `apiVersion: resource.hami.io/v1alpha1
+kind: GPUDevice
+metadata:
+  name: device-a
+  resourceVersion: "7"
+spec:
+  identity:
+    nodeName: node-a
+    deviceType: NVIDIA
+    deviceID: GPU-A
+  poolReff:
+    name: training-a
+`
+	path := filepath.Join(t.TempDir(), "device.yaml")
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"apply", "-f", path})
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), `unknown field "poolReff"`) {
+		t.Fatalf("apply error = %v, want unknown field rejection", err)
+	}
+}
+
+func TestDecodeObjectRejectsTrailingJSONValue(t *testing.T) {
+	t.Parallel()
+	object := &resourcepoolv1alpha1.GPUDevice{}
+	err := decodeObject([]byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice"} {}`), object, true)
+	if err == nil || !strings.Contains(err.Error(), "unexpected trailing JSON value") {
+		t.Fatalf("decodeObject() error = %v, want trailing JSON rejection", err)
+	}
+}
+
+func TestDecodeResourcePoolObjectPreservesUnknownPoolFields(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePool","metadata":{"name":"training-a"},"spec":{"futureField":{"enabled":true}}}`)
+	object, err := decodeResourcePoolObject(raw)
+	if err != nil {
+		t.Fatalf("decodeResourcePoolObject() error = %v", err)
+	}
+	pool, ok := object.(*unstructured.Unstructured)
+	if !ok {
+		t.Fatalf("object type = %T, want *unstructured.Unstructured", object)
+	}
+	enabled, found, err := unstructured.NestedBool(pool.Object, "spec", "futureField", "enabled")
+	if err != nil || !found || !enabled {
+		t.Fatalf("future field enabled = %t, found = %t, error = %v", enabled, found, err)
 	}
 }
 
