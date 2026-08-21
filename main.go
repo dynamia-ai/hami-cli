@@ -96,6 +96,7 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List resource pools",
+		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			cli, err := options.getClient()
 			if err != nil {
@@ -176,6 +177,7 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List discovered physical GPUs",
+		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			cli, err := options.getClient()
 			if err != nil {
@@ -310,6 +312,9 @@ func newBindingListCommand(options *commandOptions) *cobra.Command {
 		Short:   "List namespace resource-pool bindings",
 		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if allNamespaces && command.Flags().Changed("namespace") {
+				return errors.New("--all-namespaces cannot be combined with --namespace")
+			}
 			cli, err := options.getClient()
 			if err != nil {
 				return err

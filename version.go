@@ -31,12 +31,13 @@ var (
 )
 
 type cliBuildInfo struct {
-	Version   string
-	Revision  string
-	BuildDate string
-	GoVersion string
-	Compiler  string
-	Platform  string
+	Version    string
+	Revision   string
+	CommitDate string
+	BuildDate  string
+	GoVersion  string
+	Compiler   string
+	Platform   string
 }
 
 func currentCLIBuildInfo() cliBuildInfo {
@@ -45,6 +46,7 @@ func currentCLIBuildInfo() cliBuildInfo {
 }
 
 func resolveCLIBuildInfo(version, revision, buildDate string, buildInfo *debug.BuildInfo) cliBuildInfo {
+	commitDate := "unknown"
 	if buildInfo != nil {
 		if version == "devel" && buildInfo.Main.Version != "" && buildInfo.Main.Version != "(devel)" {
 			version = buildInfo.Main.Version
@@ -56,29 +58,30 @@ func resolveCLIBuildInfo(version, revision, buildDate string, buildInfo *debug.B
 					revision = setting.Value
 				}
 			case "vcs.time":
-				if buildDate == "unknown" && setting.Value != "" {
-					buildDate = setting.Value
+				if commitDate == "unknown" && setting.Value != "" {
+					commitDate = setting.Value
 				}
 			}
 		}
-		if revision == "unknown" || buildDate == "unknown" {
-			moduleRevision, moduleBuildDate := parsePseudoVersion(buildInfo.Main.Version)
+		if revision == "unknown" || commitDate == "unknown" {
+			moduleRevision, moduleCommitDate := parsePseudoVersion(buildInfo.Main.Version)
 			if revision == "unknown" && moduleRevision != "" {
 				revision = moduleRevision
 			}
-			if buildDate == "unknown" && moduleBuildDate != "" {
-				buildDate = moduleBuildDate
+			if commitDate == "unknown" && moduleCommitDate != "" {
+				commitDate = moduleCommitDate
 			}
 		}
 	}
 
 	return cliBuildInfo{
-		Version:   version,
-		Revision:  revision,
-		BuildDate: buildDate,
-		GoVersion: runtime.Version(),
-		Compiler:  runtime.Compiler,
-		Platform:  fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		Version:    version,
+		Revision:   revision,
+		CommitDate: commitDate,
+		BuildDate:  buildDate,
+		GoVersion:  runtime.Version(),
+		Compiler:   runtime.Compiler,
+		Platform:   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 	}
 }
 
@@ -102,8 +105,9 @@ func parsePseudoVersion(version string) (string, string) {
 func (info cliBuildInfo) String() string {
 	return fmt.Sprintf(`version:          %s
 revision:         %s
+commit date:      %s
 build date:       %s
 go version:       %s
 compiler:         %s
-platform:         %s`, info.Version, info.Revision, info.BuildDate, info.GoVersion, info.Compiler, info.Platform)
+platform:         %s`, info.Version, info.Revision, info.CommitDate, info.BuildDate, info.GoVersion, info.Compiler, info.Platform)
 }

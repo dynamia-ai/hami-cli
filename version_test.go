@@ -35,8 +35,11 @@ func TestResolveCLIBuildInfoUsesStandaloneModuleVersion(t *testing.T) {
 	if got.Revision != "9214a562258d" {
 		t.Errorf("Revision = %q", got.Revision)
 	}
-	if got.BuildDate != "2026-08-17T09:23:28Z" {
-		t.Errorf("BuildDate = %q", got.BuildDate)
+	if got.CommitDate != "2026-08-17T09:23:28Z" {
+		t.Errorf("CommitDate = %q", got.CommitDate)
+	}
+	if got.BuildDate != "unknown" {
+		t.Errorf("BuildDate = %q, want unknown", got.BuildDate)
 	}
 }
 
@@ -54,8 +57,11 @@ func TestResolveCLIBuildInfoPrefersVCSSettings(t *testing.T) {
 	if got.Revision != "9214a562258deb2850bd16a199950ef9c5568578" {
 		t.Errorf("Revision = %q", got.Revision)
 	}
-	if got.BuildDate != "2026-08-17T09:24:00Z" {
-		t.Errorf("BuildDate = %q", got.BuildDate)
+	if got.CommitDate != "2026-08-17T09:24:00Z" {
+		t.Errorf("CommitDate = %q", got.CommitDate)
+	}
+	if got.BuildDate != "unknown" {
+		t.Errorf("BuildDate = %q, want unknown", got.BuildDate)
 	}
 }
 
@@ -64,10 +70,12 @@ func TestResolveCLIBuildInfoPreservesReleaseMetadata(t *testing.T) {
 	buildInfo := &debug.BuildInfo{Main: debug.Module{Version: "v0.0.0-20260817092328-9214a562258d"}}
 
 	got := resolveCLIBuildInfo("latest", "abc123", "2026-08-17T10:00:00Z", buildInfo)
-	if got.Version != "latest" || got.Revision != "abc123" || got.BuildDate != "2026-08-17T10:00:00Z" {
+	if got.Version != "latest" || got.Revision != "abc123" || got.CommitDate != "2026-08-17T09:23:28Z" || got.BuildDate != "2026-08-17T10:00:00Z" {
 		t.Fatalf("resolveCLIBuildInfo() = %#v", got)
 	}
-	if output := got.String(); !strings.Contains(output, "version:          latest") {
+	if output := got.String(); !strings.Contains(output, "version:          latest") ||
+		!strings.Contains(output, "commit date:      2026-08-17T09:23:28Z") ||
+		!strings.Contains(output, "build date:       2026-08-17T10:00:00Z") {
 		t.Errorf("String() = %q", output)
 	}
 }

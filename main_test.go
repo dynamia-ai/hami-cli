@@ -94,6 +94,26 @@ func TestDeviceNameFromArgs(t *testing.T) {
 	}
 }
 
+func TestListCommandsRejectPositionalArguments(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	for _, args := range [][]string{
+		{"pool", "list", "training-a"},
+		{"device", "list", "node-a"},
+	} {
+		command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+		command.SetArgs(args)
+		err := command.Execute()
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unknown command %q", args[2])) {
+			t.Errorf("%v error = %v, want positional argument rejection", args, err)
+		}
+	}
+}
+
 func TestUnstructuredPoolNamesUseResourceQualifiedName(t *testing.T) {
 	t.Parallel()
 	pools := &unstructured.UnstructuredList{
@@ -192,6 +212,31 @@ func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 	}
 	if got, want := output.String(), "resourcepoolbinding.resource.hami.io/pool-a\nresourcepoolbinding.resource.hami.io/pool-b\n"; got != want {
 		t.Fatalf("all-namespaces binding list = %q, want %q", got, want)
+	}
+
+	conflicts := [][]string{
+		{"binding", "list", "--namespace", "team-a", "--all-namespaces"},
+		{"binding", "list", "-n", "team-a", "-A"},
+		{"--namespace", "team-a", "binding", "list", "--all-namespaces"},
+		{"binding", "ls", "--namespace", "team-a", "--all-namespaces"},
+	}
+	for _, args := range conflicts {
+		options, _ = newOptions()
+		command = newRootCommand(options)
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Errorf("%v error = %v, want namespace conflict rejection", args, err)
+		}
+	}
+
+	options, output = newOptions()
+	command = newRootCommand(options)
+	command.SetArgs([]string{"binding", "list", "--namespace", "team-a", "--all-namespaces=false", "-o", "name"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("explicit false all-namespaces error = %v", err)
+	}
+	if got, want := strings.TrimSpace(output.String()), "resourcepoolbinding.resource.hami.io/pool-a"; got != want {
+		t.Fatalf("explicit false all-namespaces result = %q, want %q", got, want)
 	}
 }
 
