@@ -94,6 +94,8 @@ Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和�
 - `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要列举、读取和写入对象，并能设置对象 ACL。
 - `ALIYUN_OSS_ENDPOINT`：可选；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。
 
+由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
+
 如公开下载域名不是 `https://storage.dynamia.ai/hami-cli`，设置 Actions variable `HAMI_CLI_DOWNLOAD_BASE_URL`。工作流会在创建 GitHub Release 前从公开域名逐个下载并比对上传结果，避免把“OSS 上传成功”误当成“用户已可下载”。
 
 ## 厂商插件方向
