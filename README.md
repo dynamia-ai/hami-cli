@@ -72,10 +72,11 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
 docker run --rm ghcr.io/dynamia-ai/hami-cli:v1.2.3 version
 ```
 
-需要访问 Kubernetes 集群时，将 kubeconfig 只读挂载到容器，并显式设置 `KUBECONFIG`：
+需要访问 Kubernetes 集群时，将 kubeconfig 只读挂载到容器，使用宿主机 UID/GID 运行，并显式设置 `KUBECONFIG`。指定 UID/GID 后，Linux 上归宿主机用户所有且权限为 `0600` 的 kubeconfig 仍可读取：
 
 ```bash
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   --volume "$HOME/.kube:/kube:ro" \
   --env KUBECONFIG=/kube/config \
   ghcr.io/dynamia-ai/hami-cli:v1.2.3 pool list
