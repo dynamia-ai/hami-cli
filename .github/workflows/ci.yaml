@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLANGCI_LINT_VERSION: v2.12.2
+  GOPRIVATE: github.com/dynamia-ai/*
+
+jobs:
+  go:
+    name: Go checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require private module token
+        env:
+          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+        run: test -n "$PRIVATE_MODULES_TOKEN"
+
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          install-only: true
+
+      - name: Run local CI contract
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.PRIVATE_MODULES_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: make ci
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-coverage
+          path: cover.out
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Container build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE_REF: local/hami-cli:${{ github.sha }}
+      IMAGE_PLATFORM: linux/amd64
+      IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+      IMAGE_REVISION: ${{ github.sha }}
+    steps:
+      - name: Require private module token
+        env:
+          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+        run: test -n "$PRIVATE_MODULES_TOKEN"
+
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and load without publishing
+        env:
+          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+        run: make build-image
+
+      - name: Inspect and smoke-test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE_REF")" = "$IMAGE_PLATFORM"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE_REF")" = "$IMAGE_SOURCE"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")" = "$IMAGE_REVISION"
+          docker run --rm "$IMAGE_REF" version | grep -F "revision:         $IMAGE_REVISION"
+
+  ci-required:
+    name: CI required
+    if: always()
+    needs: [go, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful checks
+        env:
+          GO_RESULT: ${{ needs.go.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          test "$GO_RESULT" = success
+          test "$IMAGE_RESULT" = success

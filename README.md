@@ -1,6 +1,6 @@
 # hami-cli
 
-`hami-cli` 是 HAMi 的统一命令行入口。当前版本已从 `hami-enterprise/cmd/hami-cli` 迁入资源池管理能力；Docker 场景下的厂商运行时插件尚未实现。
+`hami-cli` 是 HAMi 的统一命令行入口。源码仓库保持私有，正式版本通过公开的 OSS 二进制下载和 GHCR 容器镜像分发。当前版本已从 `hami-enterprise/cmd/hami-cli` 迁入资源池管理能力；Docker 场景下的厂商运行时插件尚未实现。
 
 ## 当前能力
 
@@ -36,14 +36,64 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go build -o bin/hami-cli .
 GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go test ./...
 ```
 
-项目发布到 GitHub 并创建版本标签后，可使用以下形式安装：
+## 安装公开版本
+
+正式版本标签采用不可变的 `vX.Y.Z`。标签指向的提交必须已进入 `main`。发布产物覆盖 Linux 和 macOS 的 amd64/arm64，以及 Windows amd64：
+
+```text
+https://storage.dynamia.ai/hami-cli/vVERSION/
+```
+
+例如，下载 Linux amd64 版本并校验：
+
+```bash
+VERSION=1.2.3
+curl -fLO "https://storage.dynamia.ai/hami-cli/v${VERSION}/hami-cli_v${VERSION}_linux_amd64.tar.gz"
+curl -fLO "https://storage.dynamia.ai/hami-cli/v${VERSION}/checksums.txt"
+sha256sum --ignore-missing --check checksums.txt
+tar -xzf "hami-cli_v${VERSION}_linux_amd64.tar.gz"
+install -m 0755 "hami-cli_v${VERSION}_linux_amd64/hami-cli" /usr/local/bin/hami-cli
+```
+
+由于源码仓库是私有仓库，以下 `go install` 方式只适用于已获得仓库和私有依赖访问权限的开发者，不是公开安装渠道：
 
 ```bash
 GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
   go install github.com/dynamia-ai/hami-cli@VERSION
 ```
 
-将 `VERSION` 替换为已发布版本。当前本地仓库尚未配置远端，因此本文不声明 `@latest` 已可用。
+将 `VERSION` 替换为已发布版本标签。
+
+## Docker
+
+容器镜像支持 `linux/amd64` 和 `linux/arm64`。首次创建 GHCR package 后，仓库管理员需要在 package 设置中取消继承私有仓库权限，并将可见性设为 `Public`；这是 GitHub 对新 package 的一次性默认限制。Release workflow 会以匿名身份验证镜像。镜像未公开时，workflow 会失败；完成设置后，只需重新运行失败的 job。之后可匿名拉取和运行：
+
+```bash
+docker run --rm ghcr.io/dynamia-ai/hami-cli:v1.2.3 version
+```
+
+需要访问 Kubernetes 集群时，将 kubeconfig 只读挂载到容器，并显式设置 `KUBECONFIG`：
+
+```bash
+docker run --rm \
+  --volume "$HOME/.kube:/kube:ro" \
+  --env KUBECONFIG=/kube/config \
+  ghcr.io/dynamia-ai/hami-cli:v1.2.3 pool list
+```
+
+kubeconfig 中的 API Server 地址必须能从容器网络访问；指向宿主机 `localhost` 的配置不能直接在容器内使用。当前 distroless 镜像不包含 `aws`、`gcloud`、`kubelogin` 等外部凭据插件，因此不能直接使用依赖 kubeconfig `exec` 插件的身份认证配置。
+
+## 发布配置
+
+Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。推送稳定版本标签后，Release workflow 会构建五个平台归档、生成 SHA-256 校验文件、上传到 OSS、创建仅授权用户可访问的 GitHub Release 副本，并发布多架构 GHCR 镜像。
+
+仓库需要配置以下 Actions secrets：
+
+- `PRIVATE_MODULES_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
+- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要列举、读取和写入对象，并能设置对象 ACL。
+- `ALIYUN_OSS_ENDPOINT`：可选；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。
+
+如公开下载域名不是 `https://storage.dynamia.ai/hami-cli`，设置 Actions variable `HAMI_CLI_DOWNLOAD_BASE_URL`。工作流会在创建 GitHub Release 前从公开域名逐个下载并比对上传结果，避免把“OSS 上传成功”误当成“用户已可下载”。
 
 ## 厂商插件方向
 

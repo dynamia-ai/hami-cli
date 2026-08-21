@@ -1,0 +1,23 @@
+version: "2"
+
+run:
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # CLI output is best-effort once command execution has succeeded. The
+      # command handlers intentionally do not turn a closed output pipe into a
+      # Kubernetes operation failure, and read-only input close errors do not
+      # change the apply result.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*os.File).Close
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
