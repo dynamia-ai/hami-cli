@@ -13,6 +13,7 @@ concurrency:
 
 env:
   GOPRIVATE: github.com/dynamia-ai/*
+  GOLANGCI_LINT_VERSION: v2.13.1
   IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
   OSSUTIL_VERSION: 2.3.0
   OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
@@ -102,7 +103,7 @@ jobs:
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           install-only: true
 
       - name: Run local CI contract
