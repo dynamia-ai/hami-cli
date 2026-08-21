@@ -38,7 +38,7 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go test ./...
 
 ## 安装公开版本
 
-正式版本标签采用不可变的 `vX.Y.Z`。标签指向的提交必须已进入 `main`。发布产物覆盖 Linux 和 macOS 的 amd64/arm64，以及 Windows amd64：
+发布产物覆盖 Linux 和 macOS 的 amd64/arm64，以及 Windows amd64。稳定版本标签采用不可变的 `vX.Y.Z`，标签指向的提交必须已进入 `main`：
 
 ```text
 https://storage.dynamia.ai/hami-cli/vVERSION/
@@ -53,6 +53,14 @@ curl -fLO "https://storage.dynamia.ai/hami-cli/v${VERSION}/checksums.txt"
 sha256sum --ignore-missing --check checksums.txt
 tar -xzf "hami-cli_v${VERSION}_linux_amd64.tar.gz"
 install -m 0755 "hami-cli_v${VERSION}_linux_amd64/hami-cli" /usr/local/bin/hami-cli
+```
+
+每次提交合入 `main` 后，workflow 还会覆盖发布 `latest` 版本。它适合持续集成验证，不提供稳定版本的不可变保证：
+
+```bash
+curl -fLO "https://storage.dynamia.ai/hami-cli/latest/hami-cli_latest_linux_amd64.tar.gz"
+curl -fLO "https://storage.dynamia.ai/hami-cli/latest/checksums.txt"
+sha256sum --ignore-missing --check checksums.txt
 ```
 
 由于源码仓库是私有仓库，以下 `go install` 方式只适用于已获得仓库和私有依赖访问权限的开发者，不是公开安装渠道：
@@ -72,6 +80,14 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
 docker run --rm ghcr.io/dynamia-ai/hami-cli:v1.2.3 version
 ```
 
+跟随 `main` 的最新镜像使用 `latest` 标签：
+
+```bash
+docker run --rm ghcr.io/dynamia-ai/hami-cli:latest version
+```
+
+GHCR 不提供服务端不可变标签。稳定版 workflow 会将镜像 digest 写入公开的 `image-digest.txt`，并验证 `vX.Y.Z` 标签在发布时指向该 digest。需要不可变镜像引用时，使用 `ghcr.io/dynamia-ai/hami-cli@sha256:...`，不要只依赖标签。GHCR package 的写权限必须只授予本仓库 workflow；其他主体拥有写权限时，可能在 workflow 结束后修改标签。
+
 需要访问 Kubernetes 集群时，将 kubeconfig 只读挂载到容器，使用宿主机 UID/GID 运行，并显式设置 `KUBECONFIG`。指定 UID/GID 后，Linux 上归宿主机用户所有且权限为 `0600` 的 kubeconfig 仍可读取：
 
 ```bash
@@ -86,17 +102,29 @@ kubeconfig 中的 API Server 地址必须能从容器网络访问；指向宿主
 
 ## 发布配置
 
-Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。推送稳定版本标签后，Release workflow 会构建五个平台归档、生成 SHA-256 校验文件、上传到 OSS、创建仅授权用户可访问的 GitHub Release 副本，并发布多架构 GHCR 镜像。
+Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。GoReleaser 统一生成五个平台归档和 SHA-256 校验文件；Actions 只负责触发策略、凭据、对象存储、GHCR 和公开可用性验证。发布分为三个通道：
+
+- 稳定标签 `vX.Y.Z`：发布不可变的 OSS 归档和容器镜像 digest，并创建仅授权用户可访问的 GitHub Release 副本。GHCR 同名标签是经过发布时校验的便捷引用，不属于不可变合同。
+- `main` 每次更新：覆盖发布 OSS 和 GHCR 的 `latest`，并在该 workflow run 中保留名为 `release-binaries-latest` 的 Actions artifact。
+- 手动调度：从 `main` 上运行 Rolling Release workflow，输入仓库中已有的远端分支。工作流将分支名归一化为 `branch-<name>`，覆盖发布同名 OSS 目录、GHCR 标签和 Actions artifact。若原分支名包含 `/`、大写字符或其他不安全字符，版本末尾会附加短哈希；最终版本名会写入 job summary。
+
+手动发布指定分支：
+
+```bash
+gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
+```
+
+稳定版 OSS 对象和 GitHub Release 资产不可覆盖；同一提交产生的相同内容可在失败后继续发布。稳定版 OSS 上传使用服务端禁止覆盖参数，并将容器镜像 digest 保存为不可变对象。若 OSS 对象、GHCR 标签或 GitHub Release 资产已存在但内容、digest 或源码 revision 不同，workflow 会停止。`latest` 和分支版本是可变通道。所有通道都会构建五个平台归档、生成 SHA-256 校验文件并发布多架构 GHCR 镜像。只有稳定标签会创建 GitHub Release。
 
 仓库需要配置以下 Actions secrets：
 
 - `HAMI_ENTERPRISE_REPO_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
-- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要列举、读取和写入对象，并能设置对象 ACL。
-- `ALIYUN_OSS_ENDPOINT`：可选；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。
+- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`、`ALIYUN_OSS_BUCKET` 和 `ALIYUN_OSS_REGION`：访问发布前缀。对应 RAM 身份需要读取 Bucket 版本控制状态，读取和写入对象，并能设置对象 ACL。发布 Bucket 必须关闭版本控制；版本控制处于 `Enabled` 或 `Suspended` 状态时，OSS 会忽略禁止覆盖参数，workflow 因此会停止。
+- `ALIYUN_OSS_ENDPOINT`：可选的 OSS 原生端点；未配置时使用 `https://oss-${ALIYUN_OSS_REGION}.aliyuncs.com`。发布脚本使用固定版本的 `ossutil`，稳定版上传会设置 `x-oss-forbid-overwrite: true`。
 
 由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
 
-如公开下载域名不是 `https://storage.dynamia.ai/hami-cli`，设置 Actions variable `HAMI_CLI_DOWNLOAD_BASE_URL`。工作流会在创建 GitHub Release 前从公开域名逐个下载并比对上传结果，避免把“OSS 上传成功”误当成“用户已可下载”。
+如公开下载域名不是 `https://storage.dynamia.ai/hami-cli`，设置 Actions variable `HAMI_CLI_DOWNLOAD_BASE_URL`。工作流会从公开域名逐个下载并比对上传结果，避免把“OSS 上传成功”误当成“用户已可下载”。当前 workflow 只发布 OSS；R2 尚未接入，也不会读取 R2 secrets。
 
 ## 厂商插件方向
 

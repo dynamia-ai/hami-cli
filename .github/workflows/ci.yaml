@@ -15,7 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  BUILDX_VERSION: v0.36.1
+  BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
   GOLANGCI_LINT_VERSION: v2.13.1
+  GORELEASER_VERSION: v2.17.1
   GOPRIVATE: github.com/dynamia-ai/*
 
 jobs:
@@ -126,7 +129,10 @@ jobs:
           test "$RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH"
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Build and load without publishing
         env:
@@ -142,10 +148,66 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")" = "$IMAGE_REVISION"
           docker run --rm "$IMAGE_REF" version | grep -F "revision:         $IMAGE_REVISION"
 
+  release-config:
+    name: GoReleaser release path
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate GoReleaser configuration
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+
+      - name: Prepare synthetic GoReleaser binaries
+        run: |
+          mkdir -p dist/linux-amd64 dist/linux-arm64
+          cp /bin/true dist/linux-amd64/hami-cli
+          cp /bin/true dist/linux-arm64/hami-cli
+          jq -n '[
+            {
+              type: "Binary",
+              goos: "linux",
+              goarch: "amd64",
+              path: "dist/linux-amd64/hami-cli"
+            },
+            {
+              type: "Binary",
+              goos: "linux",
+              goarch: "arm64",
+              path: "dist/linux-arm64/hami-cli"
+            }
+          ]' > dist/artifacts.json
+          bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Build multi-architecture release image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ runner.temp }}/release-image
+          file: ${{ runner.temp }}/release-image/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/hami-cli-release-image.tar
+          tags: local/hami-cli:ci
+
   ci-required:
     name: CI required
     if: always()
-    needs: [go, image]
+    needs: [go, image, release-config]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -153,6 +215,8 @@ jobs:
         env:
           GO_RESULT: ${{ needs.go.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          RELEASE_CONFIG_RESULT: ${{ needs.release-config.result }}
         run: |
           test "$GO_RESULT" = success
           test "$IMAGE_RESULT" = success
+          test "$RELEASE_CONFIG_RESULT" = success

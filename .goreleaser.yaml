@@ -1,0 +1,60 @@
+version: 2
+
+project_name: hami-cli
+
+builds:
+  - id: hami-cli
+    main: .
+    binary: hami-cli
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X main.cliVersion={{ .Version }}
+        -X main.cliRevision={{ .FullCommit }}
+        -X main.cliBuildDate={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: hami-cli-archives
+    ids:
+      - hami-cli
+    formats:
+      - tar.gz
+    name_template: >-
+      hami-cli_{{ if .IsSnapshot }}{{ .Version }}{{ else }}v{{ .Version }}{{ end }}_{{ .Os }}_{{ .Arch }}
+    wrap_in_directory: true
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+    files:
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Env.RELEASE_VERSION }}"
+
+release:
+  disable: true
+
+changelog:
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

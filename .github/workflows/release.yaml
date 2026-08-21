@@ -8,90 +8,63 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
+  BUILDX_VERSION: v0.36.1
+  BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
   GOPRIVATE: github.com/dynamia-ai/*
   GOLANGCI_LINT_VERSION: v2.13.1
-  IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
+  GORELEASER_VERSION: v2.17.1
   OSSUTIL_VERSION: 2.3.0
   OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
+  IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
   PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.HAMI_CLI_DOWNLOAD_BASE_URL || 'https://storage.dynamia.ai/hami-cli' }}
 
 jobs:
-  validate:
-    name: Validate release
+  release:
+    name: Publish stable release
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      build-date: ${{ steps.version.outputs.build-date }}
-      source-date-epoch: ${{ steps.version.outputs.source-date-epoch }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
     steps:
-      - name: Checkout exact tagged revision
+      - name: Checkout tagged revision
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.sha }}
 
       - name: Validate stable tag
-        id: version
+        id: release
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           [[ "$GITHUB_REF_TYPE" = tag ]]
           [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git show-ref --verify --quiet refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          echo "build-date=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
           echo "source-date-epoch=$(git show -s --format=%ct "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
 
-      - name: Require unused GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          response_file="$RUNNER_TEMP/github-release.json"
-          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
-          case "$status" in
-            404) ;;
-            200)
-              echo "GitHub release already exists: $GITHUB_REF_NAME" >&2
-              exit 1
-              ;;
-            *)
-              echo "Failed to check GitHub release: HTTP $status" >&2
-              exit 1
-              ;;
-          esac
-
-  quality:
-    name: Run release checks
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Require private module token
+      - name: Validate credentials
         env:
           HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
-      - name: Checkout exact tagged revision
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.sha }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+        run: |
+          test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
+          test -n "$OSS_ACCESS_KEY_ID"
+          test -n "$OSS_ACCESS_KEY_SECRET"
+          test -n "$OSS_BUCKET"
+          test -n "$OSS_REGION"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -106,388 +79,190 @@ jobs:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           install-only: true
 
-      - name: Run local CI contract
+      - name: Run release checks
         env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
-  binaries:
-    name: Package binaries
-    needs: [validate, quality]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Require private module token
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
-      - name: Checkout exact tagged revision
-        uses: actions/checkout@v7
+      - name: Build release artifacts with GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.sha }}
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-
-      - name: Build release archives
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
         env:
           GIT_CONFIG_COUNT: "1"
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
-        run: |
-          make package-release \
-            VERSION="${{ needs.validate.outputs.version }}" \
-            REVISION="${{ github.sha }}" \
-            BUILD_DATE="${{ needs.validate.outputs.build-date }}" \
-            SOURCE_DATE_EPOCH="${{ needs.validate.outputs.source-date-epoch }}"
-          (cd dist && sha256sum --check checksums.txt)
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v7
+      - name: Prepare image context from release binaries
+        run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
         with:
-          name: release-binaries-${{ github.sha }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
-  image:
-    name: Publish container image
-    needs: [validate, quality]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      artifact-metadata: write
-      id-token: write
-    outputs:
-      digest: ${{ steps.result.outputs.digest }}
-    steps:
-      - name: Require private module token
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
-      - name: Checkout exact tagged revision
-        uses: actions/checkout@v7
+      - name: Build immutable image archive
+        id: image-build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.sha }}
-
-      - name: Define image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=${{ github.ref_name }}
+          context: ${{ runner.temp }}/release-image
+          file: ${{ runner.temp }}/release-image/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/hami-cli-image.tar
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+            org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.licenses=Apache-2.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Detect existing image tag
-        id: existing
-        shell: bash
-        run: |
-          set -euo pipefail
-          lookup_error="$RUNNER_TEMP/image-lookup-error"
-          if inspection="$(docker buildx imagetools inspect "$IMAGE:${GITHUB_REF_NAME}" 2>"$lookup_error")"; then
-            digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! grep -Eqi 'not found|manifest unknown|name unknown' "$lookup_error"; then
-            echo "Failed to confirm that the image tag is unused" >&2
-            sed -n '1,20p' "$lookup_error" >&2
-            exit 1
-          fi
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-
-      - name: Install skopeo for existing image verification
-        if: steps.existing.outputs.exists == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-
-      - name: Verify existing image revision
-        if: steps.existing.outputs.exists == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for architecture in amd64 arm64; do
-            revision="$(skopeo inspect \
-              --authfile "$HOME/.docker/config.json" \
-              --override-os linux \
-              --override-arch "$architecture" \
-              --format '{{ index .Labels "org.opencontainers.image.revision" }}' \
-              "docker://$IMAGE:${GITHUB_REF_NAME}")"
-            if [[ "$revision" != "$GITHUB_SHA" ]]; then
-              echo "Existing $architecture image belongs to revision $revision, not $GITHUB_SHA" >&2
-              exit 1
-            fi
-          done
-
-      - name: Build and publish image
-        id: build
-        if: steps.existing.outputs.exists != 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ needs.validate.outputs.version }}
-            REVISION=${{ github.sha }}
-            BUILD_DATE=${{ needs.validate.outputs.build-date }}
-          secrets: |
-            github_token=${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+            SOURCE_DATE_EPOCH=${{ steps.release.outputs.source-date-epoch }}
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Select image digest
-        id: result
-        env:
-          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
-          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+      - name: Record immutable image digest
+        id: image-archive
         run: |
           set -euo pipefail
-          digest="${BUILT_DIGEST:-$EXISTING_DIGEST}"
+          digest="$(tar -xOf "$RUNNER_TEMP/hami-cli-image.tar" index.json \
+            | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$digest" > dist/image-digest.txt
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify digest and platforms
-        shell: bash
-        env:
-          EXPECTED_DIGEST: ${{ steps.result.outputs.digest }}
-        run: |
-          set -euo pipefail
-          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" >/dev/null
-          docker buildx imagetools inspect --raw "$IMAGE@$EXPECTED_DIGEST" > "$RUNNER_TEMP/image-index.json"
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binaries-${{ github.ref_name }}
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/image-digest.txt
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Attest container provenance
+      - name: Attest binary archives
         uses: actions/attest@v4
         with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.result.outputs.digest }}
-          push-to-registry: true
-
-  verify-public-image:
-    name: Verify public container image
-    needs: image
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
-    steps:
-      - name: Set up anonymous Docker configuration
-        env:
-          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
-        run: |
-          mkdir -p "$DOCKER_CONFIG"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          echo "::notice::GHCR creates new packages as private. If this check fails on the first release, disable inherited access and set the hami-cli package visibility to Public, then rerun failed jobs."
-
-      - name: Require anonymous image access
-        shell: bash
-        env:
-          IMAGE_TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          for attempt in {1..8}; do
-            if inspection="$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" 2>/dev/null)"; then
-              tag_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
-              if [[ "$tag_digest" = "$IMAGE_DIGEST" ]]; then
-                exit 0
-              fi
-            fi
-            if [[ "$attempt" -lt 8 ]]; then
-              sleep 5
-            fi
-          done
-          echo "Image tag is not anonymously readable at the expected digest: $IMAGE:$IMAGE_TAG" >&2
-          exit 1
-
-  publish-binaries:
-    name: Publish binary archives
-    needs: [validate, binaries]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - name: Validate publication configuration
-        env:
-          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-          OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=()
-          [[ -n "$OSS_ACCESS_KEY_ID" ]] || missing+=(ALIYUN_OSS_ACCESS_KEY_ID)
-          [[ -n "$OSS_ACCESS_KEY_SECRET" ]] || missing+=(ALIYUN_OSS_ACCESS_KEY_SECRET)
-          [[ -n "$OSS_BUCKET" ]] || missing+=(ALIYUN_OSS_BUCKET)
-          [[ -n "$OSS_REGION" ]] || missing+=(ALIYUN_OSS_REGION)
-          if (( ${#missing[@]} > 0 )); then
-            printf '::error::Missing required secrets: %s\n' "$(IFS=', '; echo "${missing[*]}")"
-            exit 1
-          fi
-          [[ "$PUBLIC_DOWNLOAD_BASE_URL" = https://* ]]
-
-      - name: Download release artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: release-binaries-${{ github.sha }}
-          path: dist
-
-      - name: Verify release artifact
-        run: |
-          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" = 5
-          (cd dist && sha256sum --check checksums.txt)
+          subject-checksums: dist/checksums.txt
 
       - name: Install ossutil
         shell: bash
         run: |
           set -euo pipefail
           workdir="$(mktemp -d)"
-          trap 'rm -rf "$workdir"' EXIT
-          cd "$workdir"
-          curl -fsSLo ossutil.zip \
+          curl -fsSLo "$workdir/ossutil.zip" \
             "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-${OSSUTIL_VERSION}-linux-amd64.zip"
-          echo "${OSSUTIL_SHA256}  ossutil.zip" | sha256sum --check --strict
-          unzip -q ossutil.zip
-          sudo install -m 0755 "ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
+          echo "$OSSUTIL_SHA256  $workdir/ossutil.zip" | sha256sum --check --strict
+          unzip -q "$workdir/ossutil.zip" -d "$workdir"
+          sudo install -m 0755 \
+            "$workdir/ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
           ossutil version
 
-      - name: Upload archives to OSS
-        shell: bash
+      - name: Publish immutable artifacts to OSS
         env:
-          VERSION: ${{ needs.validate.outputs.version }}
           OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
           OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
           OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
-          OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT || format('https://oss-{0}.aliyuncs.com', secrets.ALIYUN_OSS_REGION) }}
+        run: bash hack/publish-oss.sh immutable "$GITHUB_REF_NAME" dist
+
+      - name: Install skopeo
         run: |
-          set -euo pipefail
-          config_file="$RUNNER_TEMP/ossutilconfig"
-          trap 'rm -f "$config_file"' EXIT
-          existing_dir="$RUNNER_TEMP/existing-oss-objects"
-          mkdir -p "$existing_dir"
-          endpoint="${OSS_ENDPOINT:-https://oss-${OSS_REGION}.aliyuncs.com}"
-          cat > "$config_file" <<EOF
-          [Credentials]
-          language = EN
-          endpoint = ${endpoint}
-          accessKeyID = ${OSS_ACCESS_KEY_ID}
-          accessKeySecret = ${OSS_ACCESS_KEY_SECRET}
-          EOF
-          chmod 600 "$config_file"
+          sudo apt-get update
+          sudo apt-get install -y skopeo
 
-          release_files=(dist/*.tar.gz dist/checksums.txt)
-          for file in "${release_files[@]}"; do
-            object="oss://${OSS_BUCKET}/hami-cli/v${VERSION}/${file##*/}"
-            content_type=application/gzip
-            if [[ "${file##*/}" = checksums.txt ]]; then
-              content_type=text/plain
-            fi
-            lookup_error="$RUNNER_TEMP/oss-stat-${file##*/}.err"
-            if ossutil stat "$object" -c "$config_file" >/dev/null 2>"$lookup_error"; then
-              ossutil cp "$object" "$existing_dir/${file##*/}" -c "$config_file" -f
-              if ! cmp "$file" "$existing_dir/${file##*/}"; then
-                echo "Refusing to replace existing release object: $object" >&2
-                exit 1
-              fi
-            elif ! grep -Fq 'NoSuchKey' "$lookup_error"; then
-              echo "Failed to determine whether release object exists: $object" >&2
-              sed -n '1,20p' "$lookup_error" >&2
-              exit 1
-            else
-              ossutil cp "$file" "$object" \
-                -c "$config_file" --ignore-existing --acl public-read \
-                --cache-control 'public,max-age=31536000,immutable' \
-                --content-type "$content_type"
-            fi
-          done
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify public OSS downloads
+      - name: Check immutable image tag
+        id: image-state
         shell: bash
         env:
-          VERSION: ${{ needs.validate.outputs.version }}
+          EXPECTED_DIGEST: ${{ steps.image-archive.outputs.digest }}
         run: |
           set -euo pipefail
-          verify_dir="$RUNNER_TEMP/public-downloads"
-          mkdir -p "$verify_dir"
-          for file in dist/*; do
-            curl --retry 8 --retry-all-errors -fsSLo "$verify_dir/${file##*/}" \
-              "$PUBLIC_DOWNLOAD_BASE_URL/v${VERSION}/${file##*/}"
-            cmp "$file" "$verify_dir/${file##*/}"
-          done
+          image_ref="$IMAGE:$GITHUB_REF_NAME"
+          lookup_error="$RUNNER_TEMP/image-lookup-error"
+          if docker buildx imagetools inspect "$image_ref" >/dev/null 2>"$lookup_error"; then
+            manifest="$(docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest}}')"
+            test "$(jq -r '.digest' <<< "$manifest")" = "$EXPECTED_DIGEST"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! grep -Eqi 'not found|manifest unknown|name unknown' "$lookup_error"; then
+            echo "failed to determine whether immutable image tag exists: $image_ref" >&2
+            sed -n '1,20p' "$lookup_error" >&2
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release mirror
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          target_commitish: ${{ github.sha }}
-          files: dist/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          make_latest: false
-          body: |
-            Public binary downloads: `${{ env.PUBLIC_DOWNLOAD_BASE_URL }}/${{ github.ref_name }}/`
-
-            Container image: `${{ env.IMAGE }}:${{ github.ref_name }}`
-
-            This repository is private, so GitHub Release assets are an authenticated mirror. OSS is the public binary distribution endpoint.
-
-  release-required:
-    name: Release required
-    if: always()
-    needs: [verify-public-image, publish-binaries]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require successful publication
-        env:
-          IMAGE_RESULT: ${{ needs.verify-public-image.result }}
-          BINARIES_RESULT: ${{ needs.publish-binaries.result }}
+      - name: Publish immutable image archive
+        if: steps.image-state.outputs.publish == 'true'
         run: |
-          test "$IMAGE_RESULT" = success
-          test "$BINARIES_RESULT" = success
+          skopeo copy --all --preserve-digests --authfile "$HOME/.docker/config.json" \
+            "oci-archive:$RUNNER_TEMP/hami-cli-image.tar" \
+            "docker://$IMAGE:$GITHUB_REF_NAME"
+
+      - name: Resolve and verify image digest
+        id: image
+        shell: bash
+        env:
+          EXPECTED_DIGEST: ${{ steps.image-archive.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE:$GITHUB_REF_NAME"
+          manifest="$(docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest}}')"
+          digest="$(jq -r '.digest' <<< "$manifest")"
+          test "$digest" = "$EXPECTED_DIGEST"
+          for platform in linux/amd64 linux/arm64; do
+            metadata="$(docker buildx imagetools inspect "$image_ref" \
+              --format "{{json (index .Image \"$platform\")}}")"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' <<< "$metadata")" = "$GITHUB_SHA"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$metadata")" = "$GITHUB_REF_NAME"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest container image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify public artifacts and image
+        shell: bash
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
+        run: |
+          set -euo pipefail
+          [[ "$PUBLIC_DOWNLOAD_BASE_URL" = https://* ]]
+          for file in dist/*.tar.gz dist/checksums.txt dist/image-digest.txt; do
+            curl --retry 8 --retry-all-errors -fsSLo "$RUNNER_TEMP/${file##*/}" \
+              "$PUBLIC_DOWNLOAD_BASE_URL/$GITHUB_REF_NAME/${file##*/}"
+            cmp "$file" "$RUNNER_TEMP/${file##*/}"
+          done
+          mkdir -p "$DOCKER_CONFIG"
+          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/dev/null
+          docker buildx imagetools inspect --raw "$IMAGE:$GITHUB_REF_NAME" > "$RUNNER_TEMP/image-index.json"
+          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
+          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
+
+      - name: Create authenticated GitHub Release mirror
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash hack/publish-github-release.sh "$GITHUB_REF_NAME" dist "$PUBLIC_DOWNLOAD_BASE_URL" "$IMAGE"

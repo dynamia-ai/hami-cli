@@ -1,5 +1,6 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
+GORELEASER ?= goreleaser
 DOCKER ?= docker
 
 GO_PACKAGES ?= ./...
@@ -7,7 +8,6 @@ GO_COVERAGE_FILE ?= cover.out
 VERSION ?= devel
 REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= unknown
-SOURCE_DATE_EPOCH ?=
 LDFLAGS := -s -w \
 	-X main.cliVersion=$(VERSION) \
 	-X main.cliRevision=$(REVISION) \
@@ -20,7 +20,7 @@ IMAGE_PLATFORM ?= linux/amd64
 IMAGE_SOURCE ?= local
 IMAGE_REVISION ?= $(REVISION)
 
-.PHONY: build ci fmt fmt-check vet lint test verify-build verify \
+.PHONY: build ci fmt fmt-check vet lint test verify-build verify release-check \
 	build-image build-image-amd64 build-image-arm64 package-release
 
 build:
@@ -78,6 +78,7 @@ build-image-arm64:
 	$(call build_image,linux/arm64,$(IMAGE_REF)-arm64)
 
 package-release:
-	VERSION="$(VERSION)" REVISION="$(REVISION)" BUILD_DATE="$(BUILD_DATE)" \
-		SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
-		./hack/package-release.sh
+	RELEASE_VERSION="$(VERSION)" $(GORELEASER) release --snapshot --clean
+
+release-check:
+	$(GORELEASER) check
