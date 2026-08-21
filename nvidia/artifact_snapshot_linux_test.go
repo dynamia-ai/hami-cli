@@ -49,8 +49,8 @@ func TestSystemArtifactSnapshotIsPrivateAndIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o400 {
-		t.Fatalf("snapshot mode = %o, want 0400", info.Mode().Perm())
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("snapshot mode = %o, want 0444", info.Mode().Perm())
 	}
 	if err := os.WriteFile(originalPath, []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
@@ -66,6 +66,40 @@ func TestSystemArtifactSnapshotIsPrivateAndIndependent(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("snapshot directory still exists after cleanup: %v", err)
+	}
+}
+
+func TestSystemArtifactSnapshotUsesAbsolutePath(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporaryDirectory := t.TempDir()
+	originalDirectory := t.TempDir()
+	relativeTemp, err := filepath.Rel(workingDirectory, temporaryDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", relativeTemp)
+	originalPath := filepath.Join(originalDirectory, "libvgpu.so")
+	if err := os.WriteFile(originalPath, []byte("verified bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	snapshot, snapshotPath, cleanup, err := (systemArtifactSnapshotter{}).Snapshot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if !filepath.IsAbs(snapshotPath) {
+		t.Fatalf("snapshot path = %q, want absolute path", snapshotPath)
+	}
+	if _, err := snapshot.Stat(); err != nil {
+		t.Fatal(err)
 	}
 }
 

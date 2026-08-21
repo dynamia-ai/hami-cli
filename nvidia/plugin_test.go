@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -161,6 +162,19 @@ const (
 
 func testRequest(t *testing.T, dockerArgs []string) hamirun.Request {
 	t.Helper()
+	hasRemove := false
+	for _, argument := range dockerArgs[2:] {
+		if argument == "--rm" || strings.HasPrefix(argument, "--rm=") {
+			hasRemove = true
+			break
+		}
+	}
+	if !hasRemove {
+		withRemove := make([]string, 0, len(dockerArgs)+1)
+		withRemove = append(withRemove, dockerArgs[:2]...)
+		withRemove = append(withRemove, "--rm")
+		dockerArgs = append(withRemove, dockerArgs[2:]...)
+	}
 	return hamirun.Request{
 		DockerArgs: dockerArgs,
 		Device:     "0",
@@ -219,6 +233,7 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 		{name: "NVIDIA device", args: []string{"--device", "/dev/nvidia0", "image"}, want: "--device"},
 		{name: "NVIDIA device alias", args: []string{"--device", "/dev/char/195:1:/dev/altgpu", "image"}, want: "--device"},
 		{name: "NVIDIA device cgroup rule", args: []string{"--device-cgroup-rule", "c 195:* rmw", "image"}, want: "--device-cgroup-rule"},
+		{name: "inherited volumes", args: []string{"--volumes-from", "other", "image"}, want: "--volumes-from"},
 		{name: "environment", args: []string{"--env", "LD_PRELOAD=/bad.so", "image"}, want: "LD_PRELOAD"},
 		{name: "short environment", args: []string{"-eCUDA_DEVICE_SM_LIMIT=90", "image"}, want: "CUDA_DEVICE_SM_LIMIT"},
 		{name: "per-device environment", args: []string{"-e", "CUDA_DEVICE_MEMORY_LIMIT_0=1g", "image"}, want: "CUDA_DEVICE_MEMORY_LIMIT_0"},
@@ -287,12 +302,37 @@ func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 		"docker", "run", "--runtime=nvidia", "--privileged=false", "-i=false",
 		"--future-flag=value", "--device", os.DevNull, "--env", "SAFE=value",
 		"--device-cgroup-rule", "c 1:3 rw",
+		"--net", "host",
 		"--env", "NVIDIA_DRIVER_CAPABILITIES=all",
 		"--mount", "type=bind,src=/tmp,dst=/workspace", "image",
 		"program", "--env", "LD_PRELOAD=/command-argument", "--gpus", "literal",
 	})
 	if _, err := New().Inject(t.Context(), request); err != nil {
 		t.Fatalf("Inject() error = %v", err)
+	}
+}
+
+func TestInjectRequiresEphemeralForegroundContainer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing remove", args: []string{"docker", "run", "image"}, want: "--rm"},
+		{name: "detached", args: []string{"docker", "run", "--rm", "--detach", "image"}, want: "foreground"},
+		{name: "restartable", args: []string{"docker", "run", "--rm", "--restart", "always", "image"}, want: "restart"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := testRequest(t, []string{"docker", "run", "image"})
+			request.DockerArgs = test.args
+			_, err := New().Inject(t.Context(), request)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Inject() error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -405,6 +445,41 @@ func TestInjectRejectsRemoteDockerEndpoint(t *testing.T) {
 	}
 }
 
+func TestDockerEndpointRejectsDockerHostOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell shim")
+	}
+	directory := t.TempDir()
+	docker := filepath.Join(directory, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf 'unix:///var/run/docker.sock\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_HOST", "tcp://remote.example:2375")
+	t.Setenv("DOCKER_CONTEXT", "")
+	err := (dockerContextInspector{}).ValidateLocal(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "tcp://remote.example:2375") {
+		t.Fatalf("ValidateLocal() error = %v, want effective DOCKER_HOST rejection", err)
+	}
+}
+
+func TestDockerEndpointContextOverridesDockerHost(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell shim")
+	}
+	directory := t.TempDir()
+	docker := filepath.Join(directory, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf 'unix:///var/run/docker.sock\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_HOST", "tcp://remote.example:2375")
+	t.Setenv("DOCKER_CONTEXT", "local-test")
+	if err := (dockerContextInspector{}).ValidateLocal(t.Context()); err != nil {
+		t.Fatalf("ValidateLocal() error = %v, want DOCKER_CONTEXT to override DOCKER_HOST", err)
+	}
+}
+
 func TestInjectPinsVerifiedCoreForExecution(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -447,6 +522,76 @@ func TestInjectPinsVerifiedCoreForExecution(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Fatal("pinned Core bytes changed after the original path was replaced")
 	}
+}
+
+func TestInjectPinsValidatedAssignmentFilesForExecution(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	environmentPath := filepath.Join(directory, "environment")
+	labelPath := filepath.Join(directory, "labels")
+	if err := os.WriteFile(environmentPath, []byte("SAFE=before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(labelPath, []byte("team=hami\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugin := &Plugin{
+		goos: "linux", goarch: "amd64",
+		inspector:      &fakeInspector{wantDevice: "0"},
+		dockerEndpoint: &fakeDockerEndpoint{},
+		snapshotter:    copyingSnapshotter{directory: directory},
+	}
+	request := testRequest(t, []string{
+		"docker", "run", "--env-file", environmentPath,
+		"--label-file=" + labelPath, "image",
+	})
+	request.DryRun = false
+	originalArgs := slices.Clone(request.DockerArgs)
+	injection, err := plugin.Inject(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	defer injection.Close()
+
+	pinnedEnvironment := dockerOptionValue(t, injection.DockerArgs, "--env-file")
+	pinnedLabels := dockerOptionValue(t, injection.DockerArgs, "--label-file")
+	if pinnedEnvironment == environmentPath || pinnedLabels == labelPath {
+		t.Fatalf("assignment paths were not pinned: env=%q labels=%q", pinnedEnvironment, pinnedLabels)
+	}
+	if !slices.Equal(request.DockerArgs, originalArgs) {
+		t.Fatalf("Inject() mutated request argv: got %#v, want %#v", request.DockerArgs, originalArgs)
+	}
+	if err := os.WriteFile(environmentPath, []byte("LD_PRELOAD=/bad.so\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(labelPath, []byte("io.hami.lite.managed=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gotEnvironment, err := os.ReadFile(pinnedEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLabels, err := os.ReadFile(pinnedLabels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotEnvironment) != "SAFE=before\n" || string(gotLabels) != "team=hami\n" {
+		t.Fatalf("pinned assignments changed: env=%q labels=%q", gotEnvironment, gotLabels)
+	}
+}
+
+func dockerOptionValue(t *testing.T, args []string, name string) string {
+	t.Helper()
+	for index, argument := range args {
+		if argument == name && index+1 < len(args) {
+			return args[index+1]
+		}
+		if value, found := strings.CutPrefix(argument, name+"="); found {
+			return value
+		}
+	}
+	t.Fatalf("Docker option %s not found in %#v", name, args)
+	return ""
 }
 
 func TestParseMemory(t *testing.T) {

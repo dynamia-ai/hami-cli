@@ -34,13 +34,19 @@ func (systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, fu
 	if err != nil {
 		return nil, "", nil, err
 	}
+	originalDirectory := directory
+	directory, err = filepath.Abs(directory)
+	if err != nil {
+		_ = os.RemoveAll(originalDirectory)
+		return nil, "", nil, err
+	}
 	fail := func(err error) (*os.File, string, func(), error) {
 		_ = os.RemoveAll(directory)
 		return nil, "", nil, err
 	}
 
 	snapshotPath := filepath.Join(directory, "libvgpu.so")
-	snapshot, err := os.OpenFile(snapshotPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o400)
+	snapshot, err := os.OpenFile(snapshotPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o444)
 	if err != nil {
 		return fail(err)
 	}
@@ -56,7 +62,7 @@ func (systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, fu
 		_ = snapshot.Close()
 		return fail(err)
 	}
-	if err := snapshot.Chmod(0o400); err != nil {
+	if err := snapshot.Chmod(0o444); err != nil {
 		_ = snapshot.Close()
 		return fail(err)
 	}

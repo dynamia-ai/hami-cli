@@ -68,7 +68,7 @@ hami-cli --context TARGET_CONTEXT --request-timeout 20s device assign \
 - 操作系统和 CPU 架构为 Linux/AMD64；
 - 已安装 NVIDIA 驱动、`nvidia-smi`、rootful Docker 和 NVIDIA Container Toolkit，当前 Docker endpoint 使用本机 `unix://` socket；
 - 已准备 Linux/AMD64 的 `libvgpu.so`，并从可信发布清单或交付渠道取得制品版本和 SHA-256 摘要；
-- 目标镜像使用 glibc；Core 文件权限允许目标容器用户读取；
+- 目标镜像使用 glibc；Core 文件权限允许当前 CLI 用户读取；
 - 仅选择一个物理 GPU 索引或 `GPU-...` UUID，不使用 MIG。
 
 命令合同如下：
@@ -119,16 +119,19 @@ hami-cli run \
   -- docker run --rm ubuntu:22.04 nvidia-smi
 ```
 
-真实执行时，CLI 把 Core 字节复制到权限为 `0700` 的私有临时目录，再从同一个只读快照完成 SHA-256 和 ELF 校验并挂载到容器。即使原始路径随后被替换，Docker 读取的仍是通过校验的快照。清理辅助进程在 Docker 客户端退出后删除快照目录。
+真实执行时，CLI 把 Core、`--env-file` 和 `--label-file` 的字节复制到权限为 `0700` 的私有临时目录，再校验并使用只读快照。Core 快照权限为 `0444`，因此使用 `--user` 的非 root 容器也能加载。即使原始路径随后被替换，Docker 读取的仍是通过校验的快照。
+
+当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 
 CLI 在 `docker run` 后插入 `--gpus`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
+- `--detach`、缺少 `--rm` 或非 `no` 的 restart policy；
 - 指向 NVIDIA 设备的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；
 - HAMi Core 使用的环境变量，或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
-- 暴露 NVIDIA 设备，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
+- 暴露 NVIDIA 设备、`--volumes-from`，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
 - `io.hami.lite.*` 管理标签。
 
-`--env-file` 和 `--label-file` 只接受普通文件。CLI 在调用 Docker 前检查文件内容，包括 `--label-file` 中不含 `=` 的键。FIFO、设备文件和其他特殊文件会被拒绝。
+`--env-file` 和 `--label-file` 只接受普通文件。真实执行时，CLI 校验并把 Docker argv 中的文件路径替换为固定快照。检查范围包括 `--label-file` 中不含 `=` 的键。FIFO、设备文件和其他特殊文件会被拒绝。
 
-当前 PoC 不支持远端 Docker daemon、rootless Docker 或 musl 镜像，也不提供多容器容量账本、超售控制、调度、抢占、崩溃恢复或宿主机级安全隔离。多个容器的声明总量可能超过物理 GPU 容量，受信任的容器进程也可以绕过 `LD_PRELOAD`。这些场景应使用完整 HAMi 或 HAMi Enterprise。详细边界见 [架构说明](docs/architecture.md)。
+当前 PoC 不支持远端 Docker daemon、detached/restartable 容器、rootless Docker 或 musl 镜像，也不提供多容器容量账本、超售控制、调度、抢占、崩溃恢复或宿主机级安全隔离。多个容器的声明总量可能超过物理 GPU 容量，受信任的容器进程也可以绕过 `LD_PRELOAD`。这些场景应使用完整 HAMi 或 HAMi Enterprise。详细边界见 [架构说明](docs/architecture.md)。

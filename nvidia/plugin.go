@@ -33,6 +33,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -116,6 +117,8 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	if err := validateDockerOptions(request.DockerArgs[2:]); err != nil {
 		return hamirun.Injection{}, err
 	}
+	dockerArgs := request.DockerArgs
+	var optionCleanup func()
 
 	if !request.DryRun {
 		if plugin.goos != "linux" || plugin.goarch != "amd64" {
@@ -127,6 +130,16 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 		if err := plugin.inspector.Validate(ctx, device); err != nil {
 			return hamirun.Injection{}, err
 		}
+		dockerArgs, optionCleanup, err = pinDockerAssignmentFiles(request.DockerArgs, plugin.snapshotter)
+		if err != nil {
+			return hamirun.Injection{}, err
+		}
+		if err := validateDockerOptions(dockerArgs[2:]); err != nil {
+			if optionCleanup != nil {
+				optionCleanup()
+			}
+			return hamirun.Injection{}, err
+		}
 	}
 
 	var snapshotter artifactSnapshotter
@@ -135,8 +148,12 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	}
 	corePath, coreVersion, coreDigest, cleanup, err := verifyArtifact(request.Core, snapshotter)
 	if err != nil {
+		if optionCleanup != nil {
+			optionCleanup()
+		}
 		return hamirun.Injection{}, err
 	}
+	cleanup = combineCleanups(optionCleanup, cleanup)
 
 	bindMount, err := mountValue(
 		"type=bind",
@@ -166,7 +183,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 		"--label", "io.hami.lite.vendor=nvidia",
 		"--label", "io.hami.lite.core.version=" + coreVersion,
 		"--label", "io.hami.lite.core.sha256=" + coreDigest,
-	}, Cleanup: cleanup}, nil
+	}, DockerArgs: dockerArgs, Cleanup: cleanup}, nil
 }
 
 func validateDevice(value string) (string, error) {
@@ -357,8 +374,68 @@ func validateLoadableSharedLibrary(core *elf.File) error {
 }
 
 type dockerOption struct {
-	name  string
-	value string
+	name       string
+	value      string
+	argIndex   int
+	valueIndex int
+}
+
+func pinDockerAssignmentFiles(dockerArgs []string, snapshotter artifactSnapshotter) ([]string, func(), error) {
+	options, err := parseDockerOptions(dockerArgs[2:])
+	if err != nil {
+		return nil, nil, err
+	}
+	pinnedArgs := slices.Clone(dockerArgs)
+	cleanups := make([]func(), 0)
+	cleanup := func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			cleanups[index]()
+		}
+	}
+	for _, option := range options {
+		if option.name != "--env-file" && option.name != "--label-file" {
+			continue
+		}
+		source, err := openRegularAssignmentFile(option.value)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("pin Docker option %s=%q: %w", option.name, option.value, err)
+		}
+		snapshot, snapshotPath, snapshotCleanup, err := snapshotter.Snapshot(source)
+		_ = source.Close()
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("pin Docker option %s=%q: %w", option.name, option.value, err)
+		}
+		_ = snapshot
+		cleanups = append(cleanups, snapshotCleanup)
+		if option.valueIndex >= 0 {
+			pinnedArgs[2+option.valueIndex] = snapshotPath
+		} else {
+			pinnedArgs[2+option.argIndex] = option.name + "=" + snapshotPath
+		}
+	}
+	if len(cleanups) == 0 {
+		return pinnedArgs, nil, nil
+	}
+	return pinnedArgs, cleanup, nil
+}
+
+func combineCleanups(cleanups ...func()) func() {
+	filtered := make([]func(), 0, len(cleanups))
+	for _, cleanup := range cleanups {
+		if cleanup != nil {
+			filtered = append(filtered, cleanup)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func() {
+		for index := len(filtered) - 1; index >= 0; index-- {
+			filtered[index]()
+		}
+	}
 }
 
 func validateDockerOptions(args []string) error {
@@ -366,6 +443,7 @@ func validateDockerOptions(args []string) error {
 	if err != nil {
 		return err
 	}
+	remove := false
 	for _, option := range options {
 		switch option.name {
 		case "--gpus":
@@ -381,6 +459,23 @@ func validateDockerOptions(args []string) error {
 			}
 			if enabled {
 				return errors.New("Docker option --privileged conflicts with single-GPU device isolation")
+			}
+		case "--detach":
+			enabled, err := booleanOptionEnabled(option)
+			if err != nil {
+				return err
+			}
+			if enabled {
+				return errors.New("NVIDIA Core snapshots require a foreground Docker client; --detach is unsupported")
+			}
+		case "--rm":
+			remove, err = booleanOptionEnabled(option)
+			if err != nil {
+				return err
+			}
+		case "--restart":
+			if option.value != "no" {
+				return fmt.Errorf("Docker restart policy %q is unsupported because the Core snapshot is scoped to one foreground run", option.value)
 			}
 		case "--device":
 			if err := validateDockerDevice(option.value); err != nil {
@@ -424,7 +519,12 @@ func validateDockerOptions(args []string) error {
 			if protectedTarget(target) {
 				return fmt.Errorf("Docker tmpfs target %q conflicts with HAMi Core injection", target)
 			}
+		case "--volumes-from":
+			return errors.New("Docker option --volumes-from cannot be inspected for protected HAMi mount targets")
 		}
+	}
+	if !remove {
+		return errors.New("NVIDIA Core snapshots require --rm so the container cannot outlive its verified Core artifact")
 	}
 	return nil
 }
@@ -695,7 +795,7 @@ var longOptionsWithValues = map[string]struct{}{
 	"--ipc": {}, "--isolation": {}, "--label": {}, "--label-file": {}, "--link": {},
 	"--link-local-ip": {}, "--log-driver": {}, "--log-opt": {}, "--mac-address": {},
 	"--memory": {}, "--memory-reservation": {}, "--memory-swap": {}, "--memory-swappiness": {},
-	"--mount": {}, "--name": {}, "--network": {}, "--network-alias": {}, "--oom-score-adj": {},
+	"--mount": {}, "--name": {}, "--net": {}, "--network": {}, "--network-alias": {}, "--oom-score-adj": {},
 	"--pid": {}, "--pids-limit": {}, "--platform": {}, "--publish": {}, "--pull": {},
 	"--restart": {}, "--runtime": {}, "--security-opt": {}, "--shm-size": {},
 	"--stop-signal": {}, "--stop-timeout": {}, "--storage-opt": {}, "--sysctl": {},
@@ -736,24 +836,27 @@ func parseDockerOptions(args []string) ([]dockerOption, error) {
 		if strings.HasPrefix(token, "--") {
 			name, value, hasValue := strings.Cut(token, "=")
 			if _, found := longOptionsWithValues[name]; found {
+				option := dockerOption{name: name, value: value, argIndex: index, valueIndex: -1}
 				if !hasValue {
 					index++
 					if index >= len(args) {
 						return nil, fmt.Errorf("Docker option %s requires a value", name)
 					}
 					value = args[index]
+					option.valueIndex = index
 				}
-				options = append(options, dockerOption{name: name, value: value})
+				option.value = value
+				options = append(options, option)
 				index++
 				continue
 			}
 			if _, found := longBooleanOptions[name]; found {
-				options = append(options, dockerOption{name: name, value: value})
+				options = append(options, dockerOption{name: name, value: value, argIndex: index, valueIndex: -1})
 				index++
 				continue
 			}
 			if hasValue {
-				options = append(options, dockerOption{name: name, value: value})
+				options = append(options, dockerOption{name: name, value: value, argIndex: index, valueIndex: -1})
 				index++
 				continue
 			}
@@ -820,12 +923,29 @@ type nvidiaSMIInspector struct{}
 type dockerContextInspector struct{}
 
 func (dockerContextInspector) ValidateLocal(ctx context.Context) error {
-	command := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", `{{(index .Endpoints "docker").Host}}`)
+	if contextName := strings.TrimSpace(os.Getenv("DOCKER_CONTEXT")); contextName != "" {
+		return validateDockerContextEndpoint(ctx, contextName)
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("DOCKER_HOST")); endpoint != "" {
+		return validateLocalDockerEndpoint(endpoint)
+	}
+	return validateDockerContextEndpoint(ctx, "")
+}
+
+func validateDockerContextEndpoint(ctx context.Context, contextName string) error {
+	args := []string{"context", "inspect", "--format", `{{(index .Endpoints "docker").Host}}`}
+	if contextName != "" {
+		args = append(args, contextName)
+	}
+	command := exec.CommandContext(ctx, "docker", args...)
 	output, err := command.Output()
 	if err != nil {
 		return fmt.Errorf("inspect Docker endpoint: %w", err)
 	}
-	endpoint := strings.TrimSpace(string(output))
+	return validateLocalDockerEndpoint(strings.TrimSpace(string(output)))
+}
+
+func validateLocalDockerEndpoint(endpoint string) error {
 	if !strings.HasPrefix(endpoint, "unix://") {
 		return fmt.Errorf("NVIDIA local runtime requires a local unix Docker endpoint, current endpoint is %q", endpoint)
 	}

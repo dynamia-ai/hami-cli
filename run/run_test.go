@@ -31,13 +31,56 @@ import (
 type fakePlugin struct {
 	name      string
 	injection []string
+	dockerArg []string
 	err       error
 }
 
 func (plugin fakePlugin) Name() string { return plugin.name }
 
 func (plugin fakePlugin) Inject(_ context.Context, _ Request) (Injection, error) {
-	return Injection{Args: plugin.injection}, plugin.err
+	return Injection{Args: plugin.injection, DockerArgs: plugin.dockerArg}, plugin.err
+}
+
+func TestPrepareUsesPluginDockerArgs(t *testing.T) {
+	t.Parallel()
+	original := []string{"docker", "run", "--env-file", "/tmp/original", "--rm", "image"}
+	rewritten := []string{"docker", "run", "--env-file", "/tmp/pinned", "--rm", "image"}
+	prepared, err := Prepare(t.Context(), "test", []Plugin{fakePlugin{
+		name: "test", dockerArg: rewritten,
+	}}, Request{DockerArgs: original})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	defer prepared.Close()
+	if !reflect.DeepEqual(prepared.Argv, rewritten) {
+		t.Fatalf("Prepare() = %#v, want plugin-rewritten %#v", prepared.Argv, rewritten)
+	}
+	if original[3] != "/tmp/original" {
+		t.Fatalf("Prepare() mutated caller argv: %#v", original)
+	}
+}
+
+func TestPrepareCleansUpInvalidPluginDockerArgs(t *testing.T) {
+	t.Parallel()
+	cleaned := false
+	plugin := rewritingPlugin{cleanup: func() { cleaned = true }}
+	_, err := Prepare(t.Context(), "test", []Plugin{plugin}, Request{DockerArgs: []string{"docker", "run", "image"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid Docker command") {
+		t.Fatalf("Prepare() error = %v, want invalid Docker command", err)
+	}
+	if !cleaned {
+		t.Fatal("Prepare() did not clean up resources from invalid plugin Docker args")
+	}
+}
+
+type rewritingPlugin struct {
+	cleanup func()
+}
+
+func (rewritingPlugin) Name() string { return "test" }
+
+func (plugin rewritingPlugin) Inject(context.Context, Request) (Injection, error) {
+	return Injection{DockerArgs: []string{"not-docker"}, Cleanup: plugin.cleanup}, nil
 }
 
 type fakeRunner struct {

@@ -54,10 +54,14 @@ type Plugin interface {
 	Inject(context.Context, Request) (Injection, error)
 }
 
-// Injection contains vendor arguments and resources that must remain alive
-// until Docker has consumed the prepared command.
+// Injection contains vendor arguments, an optional rewritten Docker command,
+// and resources that must remain alive until Docker has consumed the command.
 type Injection struct {
-	Args    []string
+	// Args are inserted immediately after "docker run".
+	Args []string
+	// DockerArgs replaces the request command when a plugin pins referenced files.
+	DockerArgs []string
+	// Cleanup releases resources retained by Args or DockerArgs.
 	Cleanup func()
 }
 
@@ -133,10 +137,18 @@ func Prepare(ctx context.Context, vendor string, plugins []Plugin, request Reque
 	if err != nil {
 		return nil, fmt.Errorf("prepare %s runtime: %w", vendor, err)
 	}
-	argv := make([]string, 0, len(request.DockerArgs)+len(injection.Args))
-	argv = append(argv, request.DockerArgs[:2]...)
+	dockerArgs := request.DockerArgs
+	if injection.DockerArgs != nil {
+		dockerArgs = injection.DockerArgs
+		if len(dockerArgs) < 3 || dockerArgs[0] != "docker" || dockerArgs[1] != "run" {
+			injection.Close()
+			return nil, fmt.Errorf("plugin %q returned an invalid Docker command", vendor)
+		}
+	}
+	argv := make([]string, 0, len(dockerArgs)+len(injection.Args))
+	argv = append(argv, dockerArgs[:2]...)
 	argv = append(argv, injection.Args...)
-	argv = append(argv, request.DockerArgs[2:]...)
+	argv = append(argv, dockerArgs[2:]...)
 	return &PreparedCommand{Argv: argv, injection: injection}, nil
 }
 

@@ -54,6 +54,10 @@ func RunArtifactCleanupFromEnvironment() bool {
 
 func safeArtifactSnapshotDirectory(directory string) bool {
 	clean := filepath.Clean(directory)
-	return filepath.Dir(clean) == filepath.Clean(os.TempDir()) &&
+	tempDirectory, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	return filepath.Dir(clean) == filepath.Clean(tempDirectory) &&
 		strings.HasPrefix(filepath.Base(clean), artifactSnapshotPrefix)
 }
