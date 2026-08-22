@@ -31,9 +31,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      attestations: write
-      artifact-metadata: write
-      id-token: write
     steps:
       - name: Checkout tagged revision
         uses: actions/checkout@v7
@@ -260,13 +257,6 @@ jobs:
             test "$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$metadata")" = "$GITHUB_REF_NAME"
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Attest container image
-        uses: actions/attest@v4
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.image.outputs.digest }}
-          push-to-registry: true
 
       - name: Verify public artifacts and image
         shell: bash
