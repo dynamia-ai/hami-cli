@@ -29,7 +29,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func (systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, func(), error) {
+func (snapshotter systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, func(), error) {
 	directory, err := os.MkdirTemp("", artifactSnapshotPrefix)
 	if err != nil {
 		return nil, "", nil, err
@@ -43,6 +43,17 @@ func (systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, fu
 	fail := func(err error) (*os.File, string, func(), error) {
 		_ = os.RemoveAll(directory)
 		return nil, "", nil, err
+	}
+	filesystemFlags := systemSnapshotFilesystemFlags
+	if snapshotter.filesystemFlags != nil {
+		filesystemFlags = snapshotter.filesystemFlags
+	}
+	flags, err := filesystemFlags(directory)
+	if err != nil {
+		return fail(fmt.Errorf("inspect Core snapshot filesystem: %w", err))
+	}
+	if flags&uint64(unix.ST_NOEXEC) != 0 {
+		return fail(fmt.Errorf("Core snapshot filesystem for %q is mounted noexec; set TMPDIR to an exec-capable local filesystem", directory))
 	}
 
 	snapshotPath := filepath.Join(directory, "libvgpu.so")
@@ -88,6 +99,14 @@ func (systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File, string, fu
 		})
 	}
 	return snapshot, snapshotPath, cleanup, nil
+}
+
+func systemSnapshotFilesystemFlags(path string) (uint64, error) {
+	var filesystem unix.Statfs_t
+	if err := unix.Statfs(path, &filesystem); err != nil {
+		return 0, err
+	}
+	return uint64(filesystem.Flags), nil
 }
 
 func startArtifactCleanupProcess(directory string) (*os.File, error) {

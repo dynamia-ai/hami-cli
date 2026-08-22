@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -92,12 +93,17 @@ func testArtifact(t *testing.T) hamirun.Artifact {
 
 func testELFSharedObject(t *testing.T) []byte {
 	t.Helper()
-	return testELFImage(t, false)
+	return testELFImage(t, false, 0)
 }
 
 func testELFPIE(t *testing.T) []byte {
 	t.Helper()
-	return testELFImage(t, true)
+	return testELFImage(t, true, 0)
+}
+
+func testELFStaticPIE(t *testing.T) []byte {
+	t.Helper()
+	return testELFImage(t, false, uint64(elf.DF_1_PIE))
 }
 
 func testELFHeaderOnly(t *testing.T) []byte {
@@ -113,7 +119,7 @@ func testELFHeaderOnly(t *testing.T) []byte {
 	return bytes.Clone(header)
 }
 
-func testELFImage(t *testing.T, interpreter bool) []byte {
+func testELFImage(t *testing.T, interpreter bool, flagsOne uint64) []byte {
 	t.Helper()
 	const (
 		headerSize        = 64
@@ -124,8 +130,13 @@ func testELFImage(t *testing.T, interpreter bool) []byte {
 	if interpreter {
 		programCount++
 	}
+	dynamicEntryCount := 1
+	if flagsOne != 0 {
+		dynamicEntryCount++
+	}
 	dynamicOffset := headerSize + programCount*programHeaderSize
-	content := make([]byte, dynamicOffset+dynamicEntrySize)
+	dynamicSize := dynamicEntryCount * dynamicEntrySize
+	content := make([]byte, dynamicOffset+dynamicSize)
 	copy(content, []byte{0x7f, 'E', 'L', 'F', byte(elfClass64), byte(elfDataLittleEndian), 1, 0})
 	binary.LittleEndian.PutUint16(content[16:], 3)  // ET_DYN
 	binary.LittleEndian.PutUint16(content[18:], 62) // EM_X86_64
@@ -147,10 +158,14 @@ func testELFImage(t *testing.T, interpreter bool) []byte {
 		binary.LittleEndian.PutUint64(content[base+40:], size)
 		binary.LittleEndian.PutUint64(content[base+48:], alignment)
 	}
-	writeProgramHeader(0, 1, 5, 0, uint64(len(content)), 0x1000)            // PT_LOAD, PF_R|PF_X
-	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), dynamicEntrySize, 8) // PT_DYNAMIC, PF_R|PF_W
+	writeProgramHeader(0, 1, 5, 0, uint64(len(content)), 0x1000)               // PT_LOAD, PF_R|PF_X
+	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), uint64(dynamicSize), 8) // PT_DYNAMIC, PF_R|PF_W
 	if interpreter {
 		writeProgramHeader(2, 3, 4, uint64(dynamicOffset), 1, 1) // PT_INTERP, PF_R
+	}
+	if flagsOne != 0 {
+		binary.LittleEndian.PutUint64(content[dynamicOffset:], uint64(elf.DT_FLAGS_1))
+		binary.LittleEndian.PutUint64(content[dynamicOffset+8:], flagsOne)
 	}
 	return content
 }
@@ -398,6 +413,22 @@ func TestInjectRejectsPIECore(t *testing.T) {
 	}
 }
 
+func TestInjectRejectsStaticPIECore(t *testing.T) {
+	t.Parallel()
+	content := testELFStaticPIE(t)
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.Core.Path = filepath.Join(t.TempDir(), "core-static-pie")
+	if err := os.WriteFile(request.Core.Path, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "static PIE executable") {
+		t.Fatalf("Inject() error = %v, want static PIE rejection", err)
+	}
+}
+
 func TestValidateDeviceRejectsEmptyGPUUUID(t *testing.T) {
 	t.Parallel()
 	if _, err := validateDevice("GPU-"); err == nil {
@@ -505,11 +536,11 @@ func TestInjectPinsVerifiedCoreForExecution(t *testing.T) {
 	defer injection.Close()
 
 	var snapshotPath string
-	for _, argument := range injection.Args {
-		for _, field := range strings.Split(argument, ",") {
-			if strings.HasPrefix(field, "src=") {
-				snapshotPath = strings.TrimPrefix(field, "src=")
-			}
+	volumeSuffix := ":" + coreContainerPath + ":ro,Z"
+	for index, argument := range injection.Args {
+		if argument == "--volume" && index+1 < len(injection.Args) && strings.HasSuffix(injection.Args[index+1], volumeSuffix) {
+			snapshotPath = strings.TrimSuffix(injection.Args[index+1], volumeSuffix)
+			break
 		}
 	}
 	if snapshotPath == "" || snapshotPath == request.Core.Path {

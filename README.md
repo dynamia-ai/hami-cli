@@ -69,6 +69,7 @@ hami-cli --context TARGET_CONTEXT --request-timeout 20s device assign \
 - 已安装 NVIDIA 驱动、`nvidia-smi`、rootful Docker 和 NVIDIA Container Toolkit，当前 Docker endpoint 使用本机 `unix://` socket；
 - 已准备 Linux/AMD64 的 `libvgpu.so`，并从可信发布清单或交付渠道取得制品版本和 SHA-256 摘要；
 - 目标镜像使用 glibc；Core 文件权限允许当前 CLI 用户读取；
+- `TMPDIR` 位于允许执行映射的本地文件系统；如果文件系统使用 `noexec` 挂载选项，CLI 会在启动 Docker 前停止；
 - 仅选择一个物理 GPU 索引或 `GPU-...` UUID，不使用 MIG。
 
 命令合同如下：
@@ -104,7 +105,7 @@ hami-cli run \
 
 `CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
 
-`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 输出引用调用时校验的原始路径，不会为后续执行保留文件快照：
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 输出引用调用时校验的原始路径，不会为后续执行保留文件快照，也不会修改原始文件的 SELinux label：
 
 ```bash
 hami-cli run \
@@ -119,7 +120,7 @@ hami-cli run \
   -- docker run --rm ubuntu:22.04 nvidia-smi
 ```
 
-真实执行时，CLI 把 Core、`--env-file` 和 `--label-file` 的字节复制到权限为 `0700` 的私有临时目录，再校验并使用只读快照。Core 快照权限为 `0444`，因此使用 `--user` 的非 root 容器也能加载。即使原始路径随后被替换，Docker 读取的仍是通过校验的快照。
+真实执行时，CLI 把 Core、`--env-file` 和 `--label-file` 的字节复制到权限为 `0700` 的私有临时目录，再校验并使用只读快照。CLI 要求临时目录所在文件系统允许执行映射。Core 快照权限为 `0444`，Docker 使用私有 `Z` label 挂载该快照，因此使用 `--user` 的非 root SELinux 容器也能加载。即使原始路径随后被替换，Docker 读取的仍是通过校验的快照。
 
 当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 

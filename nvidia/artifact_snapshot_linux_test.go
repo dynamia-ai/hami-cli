@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestSystemArtifactSnapshotIsPrivateAndIndependent(t *testing.T) {
@@ -100,6 +102,35 @@ func TestSystemArtifactSnapshotUsesAbsolutePath(t *testing.T) {
 	}
 	if _, err := snapshot.Stat(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSystemArtifactSnapshotRejectsNoexecFilesystem(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	t.Setenv("TMPDIR", temporaryDirectory)
+	originalPath := filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(originalPath, []byte("verified bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	snapshotter := systemArtifactSnapshotter{filesystemFlags: func(string) (uint64, error) {
+		return uint64(unix.ST_NOEXEC), nil
+	}}
+	_, _, _, err = snapshotter.Snapshot(source)
+	if err == nil || !strings.Contains(err.Error(), "noexec") {
+		t.Fatalf("Snapshot() error = %v, want noexec rejection", err)
+	}
+	entries, readErr := os.ReadDir(temporaryDirectory)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("snapshot directory leaked after rejection: %#v", entries)
 	}
 }
 

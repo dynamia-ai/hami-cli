@@ -76,7 +76,9 @@ type artifactSnapshotter interface {
 	Snapshot(*os.File) (*os.File, string, func(), error)
 }
 
-type systemArtifactSnapshotter struct{}
+type systemArtifactSnapshotter struct {
+	filesystemFlags func(string) (uint64, error)
+}
 
 // Plugin injects the community HAMi Core into one Docker container.
 type Plugin struct {
@@ -155,12 +157,19 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	}
 	cleanup = combineCleanups(optionCleanup, cleanup)
 
-	bindMount, err := mountValue(
-		"type=bind",
-		"src="+corePath,
-		"dst="+coreContainerPath,
-		"readonly",
-	)
+	coreMountOption := "--mount"
+	var coreMountValue string
+	if request.DryRun {
+		coreMountValue, err = mountValue(
+			"type=bind",
+			"src="+corePath,
+			"dst="+coreContainerPath,
+			"readonly",
+		)
+	} else {
+		coreMountOption = "--volume"
+		coreMountValue, err = coreVolumeValue(corePath)
+	}
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -170,7 +179,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 
 	return hamirun.Injection{Args: []string{
 		"--gpus", "device=" + device,
-		"--mount", bindMount,
+		coreMountOption, coreMountValue,
 		"--mount", "type=tmpfs,dst=" + stateContainerPath + ",tmpfs-mode=1777",
 		"--mount", "type=tmpfs,dst=" + lockContainerPath + ",tmpfs-mode=1777",
 		"--env", "LD_PRELOAD=" + coreContainerPath,
@@ -184,6 +193,13 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 		"--label", "io.hami.lite.core.version=" + coreVersion,
 		"--label", "io.hami.lite.core.sha256=" + coreDigest,
 	}, DockerArgs: dockerArgs, Cleanup: cleanup}, nil
+}
+
+func coreVolumeValue(source string) (string, error) {
+	if strings.Contains(source, ":") {
+		return "", fmt.Errorf("Core snapshot path %q cannot be represented safely as a Docker volume source", source)
+	}
+	return source + ":" + coreContainerPath + ":ro,Z", nil
 }
 
 func validateDevice(value string) (string, error) {
@@ -363,7 +379,12 @@ func validateLoadableSharedLibrary(core *elf.File) error {
 		if _, err := io.ReadFull(reader, entry); err != nil {
 			return fmt.Errorf("read ELF dynamic segment: %w", err)
 		}
-		if elf.DynTag(int64(core.ByteOrder.Uint64(entry[:8]))) == elf.DT_NULL {
+		tag := elf.DynTag(int64(core.ByteOrder.Uint64(entry[:8])))
+		value := core.ByteOrder.Uint64(entry[8:])
+		if tag == elf.DT_FLAGS_1 && elf.DynFlag1(value)&elf.DF_1_PIE != 0 {
+			return errors.New("ELF dynamic flags identify a static PIE executable")
+		}
+		if tag == elf.DT_NULL {
 			return nil
 		}
 	}

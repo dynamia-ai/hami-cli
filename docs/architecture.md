@@ -71,9 +71,9 @@ NVIDIA 插件当前使用以下参数：
 - 检测会破坏 Core 注入合同的 Docker 参数冲突；
 - 提供厂商特有的诊断信息。
 
-NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。Docker 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
+NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。插件拒绝位于 `noexec` 文件系统的临时目录。Docker 使用私有 `Z` label 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`，使 SELinux 容器可以加载快照。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
 
-同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 不创建快照；输出引用调用时校验的原始路径。
+同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 不创建快照；输出引用调用时校验的原始路径，并且不修改原始文件的 SELinux label。
 
 清理辅助进程通过继承的生命周期管道等待前台 Docker 客户端退出，随后删除快照目录。插件要求 `--rm`，并拒绝 `--detach` 和非 `no` 的 restart policy，使容器生命周期不超过快照生命周期。
 
