@@ -301,7 +301,7 @@ func TestInjectRejectsNonRegularAssignmentFile(t *testing.T) {
 func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 	t.Parallel()
 	request := testRequest(t, []string{
-		"docker", "run", "--runtime=nvidia", "--privileged=false", "-i=false",
+		"docker", "run", "--runtime=nvidia", "--privileged=false", "--disable-content-trust", "-i=false",
 		"--future-flag=value", "--device", os.DevNull, "--env", "SAFE=value",
 		"--device-cgroup-rule", "c 1:3 rw",
 		"--net", "host",

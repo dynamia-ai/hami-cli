@@ -810,7 +810,7 @@ var longOptionsWithValues = map[string]struct{}{
 }
 
 var longBooleanOptions = map[string]struct{}{
-	"--detach": {}, "--help": {}, "--init": {}, "--interactive": {}, "--no-healthcheck": {},
+	"--detach": {}, "--disable-content-trust": {}, "--help": {}, "--init": {}, "--interactive": {}, "--no-healthcheck": {},
 	"--oom-kill-disable": {}, "--privileged": {}, "--publish-all": {}, "--quiet": {},
 	"--read-only": {}, "--rm": {}, "--sig-proxy": {}, "--tty": {}, "--use-api-socket": {},
 }
