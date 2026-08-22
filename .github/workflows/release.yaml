@@ -152,6 +152,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload Actions artifact
+        id: actions-artifact
         uses: actions/upload-artifact@v7
         with:
           name: release-binaries-${{ github.ref_name }}
@@ -262,7 +263,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+          for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+            base_url="${configured_base_url%/}"
             [[ "$base_url" = https://* ]]
             for file in dist/*.tar.gz dist/checksums.txt dist/image-digest.txt; do
               curl --retry 8 --retry-all-errors -fsSLo "$RUNNER_TEMP/${file##*/}" \
@@ -277,3 +279,13 @@ jobs:
         run: >-
           bash hack/publish-github-release.sh "$GITHUB_REF_NAME" dist
           "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL" "$IMAGE"
+
+      - name: Write published artifact summary
+        env:
+          ACTIONS_ARTIFACT_NAME: release-binaries-${{ github.ref_name }}
+          ACTIONS_ARTIFACT_RETENTION_DAYS: "30"
+          ACTIONS_ARTIFACT_URL: ${{ steps.actions-artifact.outputs.artifact-url }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: >-
+          bash hack/write-release-summary.sh
+          "$GITHUB_REF_NAME" dist "$IMAGE" "$IMAGE_DIGEST"

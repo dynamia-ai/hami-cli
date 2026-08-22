@@ -137,7 +137,7 @@ gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
 
 由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
 
-工作流会从两个公开下载前缀逐个下载并比对上传结果，避免把对象上传成功误当成用户已可下载。任一后端上传或公开验证失败时，发布任务都会停止。
+工作流会从两个公开下载前缀逐个下载并比对上传结果，避免把对象上传成功误当成用户已可下载。任一后端上传或公开验证失败时，发布任务都会停止。发布成功后，workflow run summary 会列出每个文件的 OSS 和 S3 公开下载链接、GHCR 镜像引用与 digest，以及需要登录 GitHub 才能访问的临时 Actions artifact 链接。
 
 ## 厂商插件方向
 

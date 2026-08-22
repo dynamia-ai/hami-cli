@@ -37,6 +37,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
       image-digest: ${{ steps.image-archive.outputs.digest }}
+      artifact-url: ${{ steps.actions-artifact.outputs.artifact-url }}
     steps:
       - name: Require main workflow for manual publication
         if: github.event_name == 'workflow_dispatch'
@@ -172,6 +173,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload rolling release payload
+        id: actions-artifact
         uses: actions/upload-artifact@v7
         with:
           name: release-binaries-${{ steps.release.outputs.version }}
@@ -343,7 +345,8 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          for base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+          for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+            base_url="${configured_base_url%/}"
             [[ "$base_url" = https://* ]]
             for file in dist/*.tar.gz dist/checksums.txt; do
               verified=false
@@ -359,3 +362,14 @@ jobs:
               [[ "$verified" = true ]]
             done
           done
+
+      - name: Write published artifact summary
+        env:
+          ACTIONS_ARTIFACT_NAME: release-binaries-${{ needs.build.outputs.version }}
+          ACTIONS_ARTIFACT_RETENTION_DAYS: "7"
+          ACTIONS_ARTIFACT_URL: ${{ needs.build.outputs.artifact-url }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: >-
+          bash release-control/hack/write-release-summary.sh
+          "$VERSION" dist "$IMAGE" "$IMAGE_DIGEST"

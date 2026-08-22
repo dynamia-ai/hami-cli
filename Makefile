@@ -42,6 +42,7 @@ lint:
 test:
 	GOWORK=off $(GO) test -race -covermode=atomic -coverprofile="$(GO_COVERAGE_FILE)" $(GO_PACKAGES)
 	test -s "$(GO_COVERAGE_FILE)"
+	bash hack/write-release-summary_test.sh
 
 verify-build:
 	GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o /dev/null .
