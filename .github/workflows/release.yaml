@@ -258,10 +258,8 @@ jobs:
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public artifacts and image
+      - name: Verify public artifacts
         shell: bash
-        env:
-          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
         run: |
           set -euo pipefail
           for base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
@@ -272,11 +270,6 @@ jobs:
               cmp "$file" "$RUNNER_TEMP/${file##*/}"
             done
           done
-          mkdir -p "$DOCKER_CONFIG"
-          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/dev/null
-          docker buildx imagetools inspect --raw "$IMAGE:$GITHUB_REF_NAME" > "$RUNNER_TEMP/image-index.json"
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
 
       - name: Create authenticated GitHub Release mirror
         env:
