@@ -29,7 +29,7 @@ NVIDIA PoC 已实现以下共享合同：
 - 真实执行时，固定并挂载通过校验的 Core 字节快照；
 - 固定并校验 `--env-file` 和 `--label-file`，避免 Docker 读取校验后的路径替换；
 - 检测会覆盖 GPU、Core 环境变量、挂载路径和管理标签的 Docker 参数；
-- `--dry-run` 输出经过 POSIX shell quoting 的可复制命令，并保留 Core bind mount 的 SELinux 私有 relabel 选项；
+- `--dry-run` 输出经过 POSIX shell quoting 的可复制命令，并使用可供多个容器共享的 Core bind mount SELinux relabel 选项；
 - 实际执行通过 `exec` 替换当前进程，保留 Docker 的标准输入输出、退出码和信号。
 
 当前只支持 Linux/AMD64、glibc 镜像、rootful 本机 Docker、NVIDIA、单物理 GPU、前台 `--rm` 容器和受信任工作负载。远端 Docker daemon、detached/restartable 容器、Ascend、多 GPU、MIG、ARM64、rootless、Windows 和 macOS 尚未实现或验证。
@@ -73,7 +73,7 @@ NVIDIA 插件当前使用以下参数：
 
 NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。插件拒绝位于 `noexec` 文件系统的临时目录。Docker 使用私有 `Z` label 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`，使 SELinux 容器可以加载快照。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
 
-同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 本身不创建快照，也不修改原始文件的 SELinux label。dry-run 输出使用 `--volume <原始路径>:/usr/local/vgpu/libvgpu.so:ro,Z`；执行该输出时，Docker 会对原始 Core 应用私有 SELinux relabel。该命令不具备真实执行路径的字节快照固定保证。
+同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 本身不创建快照，也不修改原始文件的 SELinux label。dry-run 输出使用 `--volume <原始路径>:/usr/local/vgpu/libvgpu.so:ro,z`；执行该输出时，Docker 会对原始 Core 应用可供多个容器共享的 SELinux relabel，避免并发执行引用同一 Core 的命令时互相替换私有 MCS label。该命令不具备真实执行路径的字节快照固定保证。
 
 清理辅助进程通过继承的生命周期管道等待前台 Docker 客户端退出，随后删除快照目录。插件要求 `--rm`，并拒绝 `--detach` 和非 `no` 的 restart policy，使容器生命周期不超过快照生命周期。
 

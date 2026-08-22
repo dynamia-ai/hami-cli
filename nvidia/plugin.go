@@ -158,7 +158,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	}
 	cleanup = combineCleanups(optionCleanup, cleanup)
 
-	coreMountValue, err := coreVolumeValue(corePath)
+	coreMountValue, err := coreVolumeValue(corePath, request.DryRun)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -185,11 +185,17 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	}, DockerArgs: dockerArgs, Cleanup: cleanup}, nil
 }
 
-func coreVolumeValue(source string) (string, error) {
+func coreVolumeValue(source string, dryRun bool) (string, error) {
 	if strings.Contains(source, ":") {
 		return "", fmt.Errorf("core snapshot path %q cannot be represented safely as a Docker volume source", source)
 	}
-	return source + ":" + coreContainerPath + ":ro,Z", nil
+	selinuxLabel := "Z"
+	// Dry-run mounts the original Core, so it must remain shareable by commands
+	// running concurrently. Real execution mounts a unique private snapshot.
+	if dryRun {
+		selinuxLabel = "z"
+	}
+	return source + ":" + coreContainerPath + ":ro," + selinuxLabel, nil
 }
 
 func validateDevice(value string) (string, error) {

@@ -215,7 +215,7 @@ func TestInjectBuildsNVIDIAContract(t *testing.T) {
 	for _, want := range []string{
 		"--gpus\ndevice=0",
 		"--security-opt\nno-new-privileges=true",
-		"--volume\n" + request.Core.Path + ":/usr/local/vgpu/libvgpu.so:ro,Z",
+		"--volume\n" + request.Core.Path + ":/usr/local/vgpu/libvgpu.so:ro,z",
 		"type=tmpfs,dst=/tmp/hami-lite,tmpfs-mode=1777",
 		"type=tmpfs,dst=/tmp/vgpulock,tmpfs-mode=1777",
 		"LD_PRELOAD=/usr/local/vgpu/libvgpu.so",
@@ -580,6 +580,33 @@ func TestInjectPinsVerifiedCoreForExecution(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Fatal("pinned Core bytes changed after the original path was replaced")
 	}
+}
+
+func TestInjectUsesPrivateSELinuxLabelForExecutionSnapshot(t *testing.T) {
+	t.Parallel()
+	plugin := &Plugin{
+		goos: "linux", goarch: "amd64",
+		inspector:      &fakeInspector{wantDevice: "0"},
+		dockerEndpoint: &fakeDockerEndpoint{},
+		snapshotter:    copyingSnapshotter{directory: t.TempDir()},
+	}
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.DryRun = false
+	injection, err := plugin.Inject(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	defer injection.Close()
+
+	for index, argument := range injection.Args {
+		if argument == "--volume" && index+1 < len(injection.Args) {
+			if !strings.HasSuffix(injection.Args[index+1], ":"+coreContainerPath+":ro,Z") {
+				t.Fatalf("Core mount = %q, want private SELinux label for unique execution snapshot", injection.Args[index+1])
+			}
+			return
+		}
+	}
+	t.Fatal("injection is missing Core volume")
 }
 
 func TestInjectPinsValidatedAssignmentFilesForExecution(t *testing.T) {

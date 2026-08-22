@@ -105,7 +105,7 @@ hami-cli run \
 
 `CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
 
-`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 本身不会创建文件快照或修改 SELinux label。输出命令引用调用时校验的原始 Core 路径，并包含 `:ro,Z`。执行该输出时，Docker 会对原始 Core 应用私有 SELinux relabel；该命令不具备真实执行路径的字节快照固定保证：
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 本身不会创建文件快照或修改 SELinux label。输出命令引用调用时校验的原始 Core 路径，并包含 `:ro,z`。执行该输出时，Docker 会对原始 Core 应用可供多个容器共享的 SELinux relabel，避免并发执行引用同一 Core 的 dry-run 命令时互相替换私有 MCS label；该命令不具备真实执行路径的字节快照固定保证：
 
 ```bash
 hami-cli run \
