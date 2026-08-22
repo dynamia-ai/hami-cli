@@ -57,5 +57,5 @@ done
   echo
   echo '### Actions artifact'
   echo
-  echo "- [$ACTIONS_ARTIFACT_NAME]($ACTIONS_ARTIFACT_URL) requires GitHub sign-in and is retained for $ACTIONS_ARTIFACT_RETENTION_DAYS days."
+  echo "- [$ACTIONS_ARTIFACT_NAME]($ACTIONS_ARTIFACT_URL) requires GitHub sign-in and repository read access, and is retained for $ACTIONS_ARTIFACT_RETENTION_DAYS days."
 } >> "$GITHUB_STEP_SUMMARY"

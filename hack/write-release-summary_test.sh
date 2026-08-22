@@ -33,7 +33,7 @@ grep -Fqx '| `hami-cli_v1.2.3_linux_amd64.tar.gz` | [OSS](https://oss.example.te
 grep -Fqx -- '- Reference: `ghcr.io/example/hami-cli:v1.2.3`' "$summary"
 grep -Fqx -- '- Immutable reference: `ghcr.io/example/hami-cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`' "$summary"
 grep -Fqx -- '- Digest: `sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`' "$summary"
-grep -Fqx -- '- [release-binaries-v1.2.3](https://github.example.test/actions/runs/123/artifacts/456) requires GitHub sign-in and is retained for 7 days.' "$summary"
+grep -Fqx -- '- [release-binaries-v1.2.3](https://github.example.test/actions/runs/123/artifacts/456) requires GitHub sign-in and repository read access, and is retained for 7 days.' "$summary"
 test "$(grep -c '^| `' "$summary")" -eq 6
 if grep -Fq 'hami-cli-image.tar' "$summary"; then
   echo 'private image archive must not be listed as a public download' >&2
