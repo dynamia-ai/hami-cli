@@ -197,7 +197,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 
 func coreVolumeValue(source string) (string, error) {
 	if strings.Contains(source, ":") {
-		return "", fmt.Errorf("Core snapshot path %q cannot be represented safely as a Docker volume source", source)
+		return "", fmt.Errorf("core snapshot path %q cannot be represented safely as a Docker volume source", source)
 	}
 	return source + ":" + coreContainerPath + ":ro,Z", nil
 }
@@ -214,7 +214,7 @@ func validateDevice(value string) (string, error) {
 		return value, nil
 	}
 	if len(value) > len("GPU-") && strings.HasPrefix(value, "GPU-") && strings.IndexFunc(value[4:], func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-')
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'
 	}) == -1 {
 		return value, nil
 	}
@@ -257,7 +257,7 @@ func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) 
 	wantDigest := strings.ToLower(strings.TrimSpace(artifact.SHA256))
 	wantDigest = strings.TrimPrefix(wantDigest, "sha256:")
 	if len(wantDigest) != sha256.Size*2 || strings.IndexFunc(wantDigest, func(r rune) bool {
-		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'))
+		return (r < '0' || r > '9') && (r < 'a' || r > 'f')
 	}) >= 0 {
 		return "", "", "", nil, errors.New("--core-sha256 must be a 64-character SHA-256 digest")
 	}
@@ -277,7 +277,7 @@ func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) 
 	}
 	if !info.Mode().IsRegular() {
 		_ = source.Close()
-		return "", "", "", nil, fmt.Errorf("Core artifact %q is not a regular file", absPath)
+		return "", "", "", nil, fmt.Errorf("core artifact %q is not a regular file", absPath)
 	}
 
 	candidate := source
@@ -312,21 +312,21 @@ func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) 
 	}
 	gotDigest := fmt.Sprintf("%x", hash.Sum(nil))
 	if gotDigest != wantDigest {
-		return "", "", "", nil, fmt.Errorf("Core artifact SHA-256 mismatch: got %s, want %s", gotDigest, wantDigest)
+		return "", "", "", nil, fmt.Errorf("core artifact SHA-256 mismatch: got %s, want %s", gotDigest, wantDigest)
 	}
 	core, err := elf.NewFile(io.NewSectionReader(candidate, 0, info.Size()))
 	if err != nil {
-		return "", "", "", nil, fmt.Errorf("Core artifact %q is not an ELF shared library: %w", absPath, err)
+		return "", "", "", nil, fmt.Errorf("core artifact %q is not an ELF shared library: %w", absPath, err)
 	}
-	defer core.Close()
+	defer func() { _ = core.Close() }()
 	if core.Class != elf.ELFCLASS64 || core.Data != elf.ELFDATA2LSB || core.Machine != elf.EM_X86_64 || core.Type != elf.ET_DYN {
 		return "", "", "", nil, fmt.Errorf(
-			"Core artifact %q must be a little-endian ELF64 x86-64 shared object, got class=%s data=%s machine=%s type=%s",
+			"core artifact %q must be a little-endian ELF64 x86-64 shared object, got class=%s data=%s machine=%s type=%s",
 			absPath, core.Class, core.Data, core.Machine, core.Type,
 		)
 	}
 	if err := validateLoadableSharedLibrary(core); err != nil {
-		return "", "", "", nil, fmt.Errorf("Core artifact %q must be a loadable shared library: %w", absPath, err)
+		return "", "", "", nil, fmt.Errorf("core artifact %q must be a loadable shared library: %w", absPath, err)
 	}
 	if snapshotter == nil {
 		return mountPath, version, gotDigest, nil, nil
@@ -465,10 +465,10 @@ func validateDockerOptions(args []string) error {
 	for _, option := range options {
 		switch option.name {
 		case "--gpus":
-			return errors.New("Docker option --gpus conflicts with HAMi GPU selection")
+			return errors.New("docker option --gpus conflicts with HAMi GPU selection")
 		case "--runtime":
 			if option.value != "nvidia" {
-				return fmt.Errorf("Docker runtime %q conflicts with the NVIDIA runtime contract", option.value)
+				return fmt.Errorf("docker runtime %q conflicts with the NVIDIA runtime contract", option.value)
 			}
 		case "--privileged":
 			enabled, err := booleanOptionEnabled(option)
@@ -476,7 +476,7 @@ func validateDockerOptions(args []string) error {
 				return err
 			}
 			if enabled {
-				return errors.New("Docker option --privileged conflicts with single-GPU device isolation")
+				return errors.New("docker option --privileged conflicts with single-GPU device isolation")
 			}
 		case "--detach":
 			enabled, err := booleanOptionEnabled(option)
@@ -493,7 +493,7 @@ func validateDockerOptions(args []string) error {
 			}
 		case "--restart":
 			if option.value != "no" {
-				return fmt.Errorf("Docker restart policy %q is unsupported because the Core snapshot is scoped to one foreground run", option.value)
+				return fmt.Errorf("docker restart policy %q is unsupported because the Core snapshot is scoped to one foreground run", option.value)
 			}
 		case "--device":
 			if err := validateDockerDevice(option.value); err != nil {
@@ -525,20 +525,20 @@ func validateDockerOptions(args []string) error {
 				return err
 			}
 			if protectedTarget(target) {
-				return fmt.Errorf("Docker mount target %q conflicts with HAMi Core injection", target)
+				return fmt.Errorf("docker mount target %q conflicts with HAMi Core injection", target)
 			}
 		case "--volume":
 			target := volumeTarget(option.value)
 			if protectedTarget(target) {
-				return fmt.Errorf("Docker volume target %q conflicts with HAMi Core injection", target)
+				return fmt.Errorf("docker volume target %q conflicts with HAMi Core injection", target)
 			}
 		case "--tmpfs":
 			target, _, _ := strings.Cut(option.value, ":")
 			if protectedTarget(target) {
-				return fmt.Errorf("Docker tmpfs target %q conflicts with HAMi Core injection", target)
+				return fmt.Errorf("docker tmpfs target %q conflicts with HAMi Core injection", target)
 			}
 		case "--volumes-from":
-			return errors.New("Docker option --volumes-from cannot be inspected for protected HAMi mount targets")
+			return errors.New("docker option --volumes-from cannot be inspected for protected HAMi mount targets")
 		}
 	}
 	if !remove {
@@ -553,7 +553,7 @@ func validateDockerDevice(value string) error {
 		return fmt.Errorf("cannot safely inspect Docker option --device=%q", value)
 	}
 	if strings.Contains(strings.ToLower(value), "nvidia") {
-		return fmt.Errorf("Docker option --device=%q conflicts with HAMi GPU selection", value)
+		return fmt.Errorf("docker option --device=%q conflicts with HAMi GPU selection", value)
 	}
 	source := parts[0]
 	if !filepath.IsAbs(source) {
@@ -564,7 +564,7 @@ func validateDockerDevice(value string) error {
 		return fmt.Errorf("inspect Docker option --device source %q: %w", source, err)
 	}
 	if isNVIDIADevice {
-		return fmt.Errorf("Docker option --device=%q grants NVIDIA device major %d and conflicts with HAMi GPU selection", value, nvidiaDeviceMajor)
+		return fmt.Errorf("docker option --device=%q grants NVIDIA device major %d and conflicts with HAMi GPU selection", value, nvidiaDeviceMajor)
 	}
 	return nil
 }
@@ -580,7 +580,7 @@ func validateDeviceCgroupRule(value string) error {
 		return fmt.Errorf("cannot safely inspect Docker option --device-cgroup-rule=%q", value)
 	}
 	if deviceType == "a" || (deviceType == "c" && (major == "*" || deviceNumberEquals(major, nvidiaDeviceMajor))) {
-		return fmt.Errorf("Docker option --device-cgroup-rule=%q can grant NVIDIA devices and conflicts with HAMi GPU selection", value)
+		return fmt.Errorf("docker option --device-cgroup-rule=%q can grant NVIDIA devices and conflicts with HAMi GPU selection", value)
 	}
 	if deviceType != "b" && deviceType != "c" {
 		return fmt.Errorf("cannot safely inspect Docker option --device-cgroup-rule=%q", value)
@@ -624,7 +624,7 @@ func booleanOptionEnabled(option dockerOption) (bool, error) {
 	}
 	enabled, err := strconv.ParseBool(option.value)
 	if err != nil {
-		return false, fmt.Errorf("Docker option %s has invalid boolean value %q", option.name, option.value)
+		return false, fmt.Errorf("docker option %s has invalid boolean value %q", option.name, option.value)
 	}
 	return enabled, nil
 }
@@ -647,12 +647,12 @@ func validateEnvironmentAssignment(assignment string) error {
 			}
 		}
 		if !hasRequiredDriverCapabilities(value) {
-			return fmt.Errorf("Docker environment %s must include compute and utility, got %q", key, value)
+			return fmt.Errorf("docker environment %s must include compute and utility, got %q", key, value)
 		}
 		return nil
 	}
 	if protectedEnvironmentKey(key) {
-		return fmt.Errorf("Docker environment %s conflicts with HAMi Core injection", key)
+		return fmt.Errorf("docker environment %s conflicts with HAMi Core injection", key)
 	}
 	return nil
 }
@@ -673,7 +673,7 @@ func hasRequiredDriverCapabilities(value string) bool {
 func validateLabelAssignment(assignment string) error {
 	key := assignmentKey(assignment)
 	if strings.HasPrefix(key, "io.hami.lite.") {
-		return fmt.Errorf("Docker label %s is managed by hami-cli", key)
+		return fmt.Errorf("docker label %s is managed by hami-cli", key)
 	}
 	return nil
 }
@@ -690,7 +690,7 @@ func validateAssignmentFile(filename string, lookup func(string) (string, bool),
 	}
 	for _, assignment := range assignments {
 		if err := validate(assignment); err != nil {
-			return fmt.Errorf("Docker %s file %q: %w", kind, filename, err)
+			return fmt.Errorf("docker %s file %q: %w", kind, filename, err)
 		}
 	}
 	return nil
@@ -762,7 +762,7 @@ func mountTarget(value string) (string, error) {
 		}
 	}
 	if target == "" {
-		return "", fmt.Errorf("Docker --mount value %q has no destination", value)
+		return "", fmt.Errorf("docker --mount value %q has no destination", value)
 	}
 	return target, nil
 }
@@ -867,7 +867,7 @@ func parseDockerOptions(args []string) ([]dockerOption, error) {
 				if !hasValue {
 					index++
 					if index >= len(args) {
-						return nil, fmt.Errorf("Docker option %s requires a value", name)
+						return nil, fmt.Errorf("docker option %s requires a value", name)
 					}
 					value = args[index]
 					option.valueIndex = index
@@ -917,7 +917,7 @@ func parseDockerOptions(args []string) ([]dockerOption, error) {
 			if value == "" {
 				index++
 				if index >= len(args) {
-					return nil, fmt.Errorf("Docker option -%c requires a value", shortName)
+					return nil, fmt.Errorf("docker option -%c requires a value", shortName)
 				}
 				value = args[index]
 				consumedNext = true

@@ -53,7 +53,7 @@ func (snapshotter systemArtifactSnapshotter) Snapshot(source *os.File) (*os.File
 		return fail(fmt.Errorf("inspect Core snapshot filesystem: %w", err))
 	}
 	if flags&uint64(unix.ST_NOEXEC) != 0 {
-		return fail(fmt.Errorf("Core snapshot filesystem for %q is mounted noexec; set TMPDIR to an exec-capable local filesystem", directory))
+		return fail(fmt.Errorf("core snapshot filesystem for %q is mounted noexec; set TMPDIR to an exec-capable local filesystem", directory))
 	}
 
 	snapshotPath := filepath.Join(directory, "libvgpu.so")

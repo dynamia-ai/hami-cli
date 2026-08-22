@@ -24,5 +24,5 @@ import (
 )
 
 func (systemArtifactSnapshotter) Snapshot(*os.File) (*os.File, string, func(), error) {
-	return nil, "", nil, errors.New("Core artifact snapshots require Linux")
+	return nil, "", nil, errors.New("core artifact snapshots require Linux")
 }

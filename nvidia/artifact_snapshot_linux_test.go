@@ -139,7 +139,7 @@ func TestArtifactCleanupProcessRemovesDirectoryAfterLifetimeCloses(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(directory)
+	defer func() { _ = os.RemoveAll(directory) }()
 	lifetime, err := startArtifactCleanupProcess(directory)
 	if err != nil {
 		t.Fatal(err)
