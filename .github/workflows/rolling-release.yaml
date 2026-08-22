@@ -23,7 +23,7 @@ env:
   OSSUTIL_VERSION: 2.3.0
   OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
   IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
-  ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL || 'https://storage.dynamia.ai/hami-cli' }}
+  ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL }}
   S3_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.S3_PUBLIC_DOWNLOAD_BASE_URL }}
 
 jobs:
@@ -193,9 +193,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      attestations: write
-      artifact-metadata: write
-      id-token: write
     steps:
       - name: Checkout trusted release tooling
         uses: actions/checkout@v7
@@ -254,11 +251,6 @@ jobs:
           test -n "$S3_REGION"
           test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
           test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
-
-      - name: Attest binary archives
-        uses: actions/attest@v4
-        with:
-          subject-checksums: dist/checksums.txt
 
       - name: Install ossutil
         shell: bash
@@ -344,13 +336,6 @@ jobs:
             test "$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$metadata")" = "$VERSION"
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Attest mutable image
-        uses: actions/attest@v4
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.image.outputs.digest }}
-          push-to-registry: true
 
       - name: Verify public artifacts and image
         shell: bash

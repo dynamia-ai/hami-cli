@@ -126,7 +126,7 @@ gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
 
 仓库还需要配置以下 Actions variables：
 
-- `ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL`：OSS 公开下载前缀。默认值为 `https://storage.dynamia.ai/hami-cli`。
+- `ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL`：OSS 公开下载前缀，无默认值。
 - `S3_PUBLIC_DOWNLOAD_BASE_URL`：S3 兼容存储公开下载前缀，无默认值。使用 R2 时，需要先为 Bucket 启用公开自定义域名或 `r2.dev` 地址，再将包含 `/hami-cli` 的公开前缀写入该变量。R2 不支持 S3 对象 ACL，发布脚本不会设置 `public-read`。
 
 由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
