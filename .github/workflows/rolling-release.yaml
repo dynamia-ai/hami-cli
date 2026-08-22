@@ -255,11 +255,6 @@ jobs:
           test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
           test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
-      - name: Attest binary archives
-        uses: actions/attest@v4
-        with:
-          subject-checksums: dist/checksums.txt
-
       - name: Install ossutil
         shell: bash
         run: |
