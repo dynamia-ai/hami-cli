@@ -24,6 +24,8 @@ RUN --mount=type=secret,id=github_token,required=true \
 
 COPY *.go ./
 COPY skills/ ./skills/
+COPY nvidia/ ./nvidia/
+COPY run/ ./run/
 RUN --mount=type=secret,id=github_token,required=true \
     set -eu; \
     token="$(cat /run/secrets/github_token)"; \
