@@ -1,157 +1,330 @@
 # hami-cli
 
-`hami-cli` 是 HAMi 的统一命令行入口。源码仓库保持私有，正式版本通过公开的 OSS 二进制下载和受限访问的 GHCR 容器镜像分发。当前版本已从 `hami-enterprise/cmd/hami-cli` 迁入资源池管理能力；Docker 场景下的厂商运行时插件尚未实现。
+`hami-cli` 用于管理 HAMi Enterprise 的物理 GPU 资源池。它通过 Kubernetes API 查看资源池和 GPU 清单、调整 GPU 归属，以及管理命名空间对资源池的访问权。当前资源池 PoC 只支持 NVIDIA 物理 GPU。
 
-## 当前能力
+当前版本只提供 Kubernetes 资源池管理能力，不安装 HAMi Enterprise、资源池控制器或 CRD。Docker 场景的 NVIDIA、Ascend 等厂商运行时插件仍处于设计阶段，尚无可用的 `run` 命令。
 
-当前命令用于管理 HAMi Enterprise 的物理 GPU 资源池：
+## 安装
 
-| 命令 | 作用 |
-|---|---|
-| `hami-cli pool list/create/delete` | 查看、创建或删除 `ResourcePool` |
-| `hami-cli device list/assign/unassign` | 查看 GPU，或修改 GPU 与资源池的归属关系 |
-| `hami-cli binding list` | 查看命名空间与资源池的绑定关系 |
-| `hami-cli bind/unbind` | 授予或撤销命名空间的资源池访问权 |
-| `hami-cli apply -f` | 从 YAML 或 JSON 应用资源池对象 |
-| `hami-cli version` | 查看版本和构建信息 |
+### 公开二进制
 
-命令沿用标准 kubeconfig 加载规则，并支持 `--kubeconfig`、`--context`、`--namespace` 等 Kubernetes 客户端参数。
+公开归档覆盖以下平台：
 
-## 本地构建
+| 操作系统 | 架构 | 归档后缀 |
+| --- | --- | --- |
+| Linux | x86-64 | `linux_amd64.tar.gz` |
+| Linux | ARM64 | `linux_arm64.tar.gz` |
+| macOS | Intel | `darwin_amd64.tar.gz` |
+| macOS | Apple silicon | `darwin_arm64.tar.gz` |
+| Windows | x86-64 | `windows_amd64.tar.gz` |
 
-前置条件：
-
-- Go 1.26.0 或更高的 Go 1.26 补丁版本。
-- 能够读取 `github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api` 私有 Go 模块。
-
-执行以下命令：
+以下命令安装随 `main` 更新的 `latest` Linux amd64 版本：
 
 ```bash
-GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go build -o bin/hami-cli .
+VERSION=latest
+PLATFORM=linux_amd64
+BASE_URL=https://storage.dynamia.ai/hami-cli
+ARCHIVE="hami-cli_${VERSION}_${PLATFORM}.tar.gz"
+
+curl -fLO "$BASE_URL/$VERSION/$ARCHIVE"
+curl -fLO "$BASE_URL/$VERSION/checksums.txt"
+grep "  $ARCHIVE\$" checksums.txt > "$ARCHIVE.sha256"
+sha256sum -c "$ARCHIVE.sha256"
+tar -xzf "$ARCHIVE"
+sudo install -m 0755 "hami-cli_${VERSION}_${PLATFORM}/hami-cli" /usr/local/bin/hami-cli
+hami-cli version
 ```
 
-运行单元测试：
+macOS 可将校验命令替换为：
 
 ```bash
-GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go test ./...
+shasum -a 256 -c "$ARCHIVE.sha256"
 ```
 
-## 安装公开版本
+`checksums.txt` 用于检查下载内容是否完整。归档和校验文件来自同一个公开发布通道，因此该校验不能替代独立的制品签名或来源证明。
 
-发布产物覆盖 Linux 和 macOS 的 amd64/arm64，以及 Windows amd64。稳定版本标签采用不可变的 `vX.Y.Z`，标签指向的提交必须已进入 `main`：
+`latest` 是可变版本，适合验证和持续集成，不提供不可变保证。稳定版发布后，将 `VERSION` 替换为完整标签，例如 `vX.Y.Z`。目录名和归档文件名都保留前导 `v`。
 
-```text
-https://storage.dynamia.ai/hami-cli/vVERSION/
-```
+公开文件同时发布到两个下载前缀。一个地址不可用时，可切换到另一个地址，文件名和目录结构不变：
 
-例如，下载 Linux amd64 版本并校验：
+- `https://storage.dynamia.ai/hami-cli`
+- `https://public.hami.run/hami-cli`
 
-```bash
-VERSION=1.2.3
-curl -fLO "https://storage.dynamia.ai/hami-cli/v${VERSION}/hami-cli_v${VERSION}_linux_amd64.tar.gz"
-curl -fLO "https://storage.dynamia.ai/hami-cli/v${VERSION}/checksums.txt"
-sha256sum --ignore-missing --check checksums.txt
-tar -xzf "hami-cli_v${VERSION}_linux_amd64.tar.gz"
-install -m 0755 "hami-cli_v${VERSION}_linux_amd64/hami-cli" /usr/local/bin/hami-cli
-```
+### `go install`
 
-每次提交合入 `main` 后，workflow 还会覆盖发布 `latest` 版本。它适合持续集成验证，不提供稳定版本的不可变保证：
-
-```bash
-curl -fLO "https://storage.dynamia.ai/hami-cli/latest/hami-cli_latest_linux_amd64.tar.gz"
-curl -fLO "https://storage.dynamia.ai/hami-cli/latest/checksums.txt"
-sha256sum --ignore-missing --check checksums.txt
-```
-
-由于源码仓库是私有仓库，以下 `go install` 方式只适用于已获得仓库和私有依赖访问权限的开发者，不是公开安装渠道：
+源码仓库及资源池 API 依赖均为私有模块。只有同时拥有两个仓库读取权限的开发者才能使用 `go install`：
 
 ```bash
 GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
   go install github.com/dynamia-ai/hami-cli@VERSION
 ```
 
-将 `VERSION` 替换为已发布版本标签。
+将 `VERSION` 替换为已发布标签或其他可解析的 Go 模块版本。公开用户应使用预编译归档。
 
-## Docker
+## 连接集群
 
-容器镜像支持 `linux/amd64` 和 `linux/arm64`。GHCR package 保持私有；拉取前需要使用对该 package 有读取权限的 GitHub 用户，以及包含 `read:packages` scope 的 personal access token (classic) 登录。组织启用 SSO 时，还需要为该 token 授权 SSO：
+使用资源池命令前，确认以下条件：
+
+- 集群已安装 HAMi Enterprise 资源池控制器及 `resource.hami.io/v1alpha1` CRD。
+- kubeconfig 指向目标集群，并包含待操作资源所需的 RBAC 权限。
+- 本地能够访问 kubeconfig 中的 API Server 和身份认证程序。
+
+先确认当前上下文，再检查 CLI 能否读取资源池对象：
+
+```bash
+kubectl config current-context
+hami-cli version
+hami-cli pool list
+hami-cli device list
+hami-cli binding list
+```
+
+如果集群尚未安装资源池 CRD，命令会返回资源类型不存在，而不是自动修改集群。
+
+## 常用操作
+
+### 命令一览
+
+| 命令 | 作用 |
+| --- | --- |
+| `hami-cli pool list/create/delete` | 查看、创建或删除 `ResourcePool` |
+| `hami-cli device list/assign/unassign` | 查看物理 GPU，或修改 GPU 的资源池归属 |
+| `hami-cli binding list` | 查看命名空间与资源池的绑定关系 |
+| `hami-cli bind/unbind` | 授予或撤销命名空间对资源池的访问权 |
+| `hami-cli apply -f` | 从 YAML、JSON 或标准输入应用资源池对象 |
+| `hami-cli version` | 查看版本、源码 revision、构建时间和目标平台 |
+| `hami-cli completion` | 生成 Bash、Zsh、Fish 或 PowerShell 补全脚本 |
+
+### 查看资源池、设备和绑定
+
+```bash
+# 查看资源池及已发现、健康的 GPU 数量
+hami-cli pool list
+
+# 查看全部物理 GPU，或只查看指定节点
+hami-cli device list
+hami-cli device list --node worker-gpu-01
+
+# 查看当前命名空间或全部命名空间的绑定
+hami-cli binding list
+hami-cli binding list --all-namespaces
+```
+
+`pool list`、`device list` 和 `binding list` 支持 `table`、`name`、`json`、`yaml` 四种输出格式：
+
+```bash
+hami-cli pool list -o name
+hami-cli device list -o yaml
+hami-cli binding list -A -o json
+```
+
+### 创建资源池并分配 GPU
+
+先创建空资源池，再从 `device list` 输出中选择设备：
+
+```bash
+hami-cli pool create training
+hami-cli device list --node worker-gpu-01
+```
+
+可以使用 `GPUDevice` 对象名分配设备：
+
+```bash
+hami-cli device assign GPUDEVICE_NAME --pool training
+```
+
+对于 NVIDIA 设备，也可以使用节点名和物理 GPU UUID。两个参数必须同时提供；该快捷方式会按 NVIDIA 设备类型计算 `GPUDevice` 对象名：
+
+```bash
+hami-cli device assign \
+  --node worker-gpu-01 \
+  --device-id GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
+  --pool training
+```
+
+移除设备归属：
+
+```bash
+hami-cli device unassign GPUDEVICE_NAME
+hami-cli device unassign \
+  --node worker-gpu-01 \
+  --device-id GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+```
+
+设备归属更新带有资源版本前置条件。对象被其他客户端并发修改时，命令返回冲突，不会覆盖更新后的状态。删除资源池前，需要先移除设备归属和其他引用：
+
+```bash
+hami-cli pool delete training
+```
+
+### 授予命名空间访问权
+
+将命名空间 `team-a` 绑定到资源池 `training`：
+
+```bash
+hami-cli bind --namespace team-a --pool training
+hami-cli binding list --namespace team-a
+```
+
+撤销绑定：
+
+```bash
+hami-cli unbind --namespace team-a --pool training
+```
+
+`unbind` 只撤销后续 Pod 使用该资源池的权限，不表示已有 Pod 会被删除或立即回收 GPU。
+
+## Kubernetes 配置与权限
+
+`hami-cli` 使用 Kubernetes `client-go` 的标准 kubeconfig 加载规则。常用全局参数包括：
+
+- `--kubeconfig`：指定 kubeconfig 文件。
+- `--context`：选择 kubeconfig context。
+- `--namespace` / `-n`：覆盖当前 context 的默认命名空间。
+- `--server`、`--token` 和客户端证书参数：直接覆盖连接配置。
+- `--as`、`--as-group` 和 `--as-uid`：使用 Kubernetes impersonation。
+
+使用 `hami-cli --help` 查看全部参数。
+
+只读命令需要读取 `ResourcePool`、`GPUDevice` 或 `ResourcePoolBinding`。修改命令还需要对应对象的 `create`、`patch` 或 `delete` 权限。最终授权结果由集群 RBAC、准入策略和 HAMi Enterprise 服务端共同决定。
+
+`ResourcePoolBinding` 是命名空间资源：
+
+- 未显式指定命名空间时，使用当前 kubeconfig context 的默认命名空间。
+- `binding list --all-namespaces` 不能与 `--namespace` 同时使用。
+- `apply` 输入已包含命名空间且同时传入不同的 `--namespace` 时，命令拒绝操作。
+
+## 从 YAML 或 JSON 应用对象
+
+`apply` 接受 `ResourcePool`、`GPUDevice` 和 `ResourcePoolBinding`，支持多文档 YAML、JSON 文件和标准输入：
+
+```yaml
+apiVersion: resource.hami.io/v1alpha1
+kind: ResourcePool
+metadata:
+  name: training
+spec: {}
+---
+apiVersion: resource.hami.io/v1alpha1
+kind: ResourcePoolBinding
+metadata:
+  name: training
+  namespace: team-a
+spec:
+  poolRef:
+    name: training
+```
+
+```bash
+hami-cli apply -f resources.yaml
+cat resources.yaml | hami-cli apply -f -
+```
+
+多文档输入按出现顺序逐个应用，不提供跨对象事务。后续文档失败时，之前已经成功应用的对象不会自动回滚。
+
+`ResourcePool` 和 `ResourcePoolBinding` 使用字段管理器 `hami-cli` 执行 Server-Side Apply。字段所有权冲突会直接返回，不会强制接管其他管理器的字段。
+
+`GPUDevice` 清单只能修改已由控制器发现的设备，不能创建新设备。修改前先导出最新对象，保留 `metadata.resourceVersion` 和 `spec.identity`，只调整 `spec.poolRef`：
+
+```bash
+kubectl get gpudevice GPUDEVICE_NAME -o yaml > device.yaml
+# 编辑 device.yaml 中的 spec.poolRef
+hami-cli apply -f device.yaml
+```
+
+如果 `resourceVersion` 已过期，错误信息会包含当前资源版本和资源池归属。设备身份与控制器清单不一致时，`apply` 也会停止，避免覆盖并发更新或伪造设备清单。
+
+## kubectl 插件和命令补全
+
+将同一二进制以 `kubectl-hami_cli` 的名称放入 `PATH` 后，可以使用 kubectl 插件形式执行：
+
+```bash
+kubectl hami-cli pool list
+```
+
+可为当前 shell 加载命令补全：
+
+```bash
+source <(hami-cli completion bash)
+source <(hami-cli completion zsh)
+```
+
+Fish 和 PowerShell 也可通过 `hami-cli completion --help` 查看生成方式。
+
+## 容器镜像
+
+容器镜像支持 `linux/amd64` 和 `linux/arm64`。GHCR package 当前需要登录；GitHub 用户必须具有该 package 的读取权限，并使用包含 `read:packages` scope 的 personal access token (classic)。组织启用 SSO 时，还需要为 token 授权 SSO：
 
 ```bash
 echo "$CR_PAT" | docker login ghcr.io -u GITHUB_USERNAME --password-stdin
-```
-
-登录后可运行稳定版本：
-
-```bash
-docker run --rm ghcr.io/dynamia-ai/hami-cli:v1.2.3 version
-```
-
-跟随 `main` 的最新镜像使用 `latest` 标签：
-
-```bash
 docker run --rm ghcr.io/dynamia-ai/hami-cli:latest version
 ```
 
-GHCR 不提供服务端不可变标签。稳定版 workflow 会将镜像 digest 写入公开的 `image-digest.txt`，并验证 `vX.Y.Z` 标签在发布时指向该 digest。需要不可变镜像引用时，使用 `ghcr.io/dynamia-ai/hami-cli@sha256:...`，不要只依赖标签。GHCR package 的写权限必须只授予本仓库 workflow；其他主体拥有写权限时，可能在 workflow 结束后修改标签。
-
-需要访问 Kubernetes 集群时，将 kubeconfig 只读挂载到容器，使用宿主机 UID/GID 运行，并显式设置 `KUBECONFIG`。指定 UID/GID 后，Linux 上归宿主机用户所有且权限为 `0600` 的 kubeconfig 仍可读取：
+需要访问集群时，只读挂载 kubeconfig，并使用宿主机 UID/GID 运行：
 
 ```bash
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   --volume "$HOME/.kube:/kube:ro" \
   --env KUBECONFIG=/kube/config \
-  ghcr.io/dynamia-ai/hami-cli:v1.2.3 pool list
+  ghcr.io/dynamia-ai/hami-cli:latest pool list
 ```
 
-kubeconfig 中的 API Server 地址必须能从容器网络访问；指向宿主机 `localhost` 的配置不能直接在容器内使用。当前 distroless 镜像不包含 `aws`、`gcloud`、`kubelogin` 等外部凭据插件，因此不能直接使用依赖 kubeconfig `exec` 插件的身份认证配置。
+容器使用时注意以下限制：
 
-## 发布配置
+- kubeconfig 中的 API Server 必须能从容器网络访问。宿主机 `localhost` 不代表容器内的宿主机。
+- 当前 distroless 镜像不包含 `aws`、`gcloud`、`kubelogin` 等外部程序，不能直接执行 kubeconfig 的 `exec` 认证插件。
+- GHCR 标签可以被更新。稳定发布的 `image-digest.txt` 和 workflow run summary 会提供 `image@sha256:...` 不可变引用。
 
-Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。GoReleaser 统一生成五个平台归档和 SHA-256 校验文件；Actions 只负责触发策略、凭据、对象存储公开可用性验证和登录态 GHCR 校验。发布分为三个通道：
+## 常见问题
 
-- 稳定标签 `vX.Y.Z`：向 OSS 和 S3 兼容存储发布不可变归档及容器镜像 digest，并创建仅授权用户可访问的 GitHub Release 副本。GHCR 同名标签是经过发布时校验的便捷引用，不属于不可变合同。
-- `main` 每次更新：覆盖发布 OSS、S3 兼容存储和 GHCR 的 `latest`，并在该 workflow run 中保留名为 `release-binaries-latest` 的 Actions artifact。
-- 手动调度：从 `main` 上运行 Rolling Release workflow，输入仓库中已有的远端分支。工作流将分支名归一化为 `branch-<name>`，覆盖发布同名对象存储目录、GHCR 标签和 Actions artifact。若原分支名包含 `/`、大写字符或其他不安全字符，版本末尾会附加短哈希；最终版本名会写入 job summary。
+### 服务器找不到资源类型
 
-手动发布指定分支：
+先确认 kubeconfig context 和 CRD：
 
 ```bash
-gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
+kubectl config current-context
+kubectl api-resources --api-group=resource.hami.io
 ```
 
-稳定版 OSS、S3 兼容存储对象和 GitHub Release 资产不可覆盖；同一提交产生的相同内容可在失败后继续发布。OSS 上传使用服务端禁止覆盖参数；S3 上传使用 `If-None-Match: *` 条件请求。两个后端都会保存容器镜像 digest。若对象、GHCR 标签或 GitHub Release 资产已存在但内容、digest 或源码 revision 不同，workflow 会停止。`latest` 和分支版本是可变通道。所有通道都会构建五个平台归档、生成 SHA-256 校验文件并发布多架构 GHCR 镜像。只有稳定标签会创建 GitHub Release。
+目标集群没有列出 `ResourcePool`、`GPUDevice` 和 `ResourcePoolBinding` 时，先安装或修复 HAMi Enterprise 资源池组件。
 
-仓库需要配置以下 Actions secrets：
+### 请求返回 `forbidden`
 
-- `HAMI_ENTERPRISE_REPO_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于下载私有 Go 模块。
-- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`：OSS 访问凭据。
-- `ALIYUN_OSS_BUCKET`、`ALIYUN_OSS_ENDPOINT`、`ALIYUN_OSS_REGION`：OSS Bucket 名称、原生 API 端点和区域。工作流不推导默认端点，这三个 Secret 均为必填项。对应 RAM 身份需要读取 Bucket 版本控制状态，读取和写入对象，并能设置对象 ACL。发布 Bucket 必须关闭版本控制；版本控制处于 `Enabled` 或 `Suspended` 状态时，workflow 会停止。
-- `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`：S3 兼容存储访问凭据。
-- `S3_BUCKET`、`S3_ENDPOINT`、`S3_REGION`：S3 兼容存储的 Bucket 名称、API 端点和区域。使用 Cloudflare R2 时，`S3_ENDPOINT` 为 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`，`S3_REGION` 为 `auto`。R2 API Token 至少需要目标 Bucket 的 Object Read & Write 权限。
+使用同一身份检查具体操作权限：
 
-仓库还需要配置以下 Actions variables：
+```bash
+kubectl auth can-i list resourcepools.resource.hami.io
+kubectl auth can-i patch gpudevices.resource.hami.io
+kubectl auth can-i create resourcepoolbindings.resource.hami.io -n team-a
+```
 
-- `ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL`：OSS 公开下载前缀，无默认值。
-- `S3_PUBLIC_DOWNLOAD_BASE_URL`：S3 兼容存储公开下载前缀，无默认值。使用 R2 时，需要先为 Bucket 启用公开自定义域名或 `r2.dev` 地址，再将包含 `/hami-cli` 的公开前缀写入该变量。R2 不支持 S3 对象 ACL，发布脚本不会设置 `public-read`。
+不要通过 `--insecure-skip-tls-verify` 或更换 context 绕过 RBAC 问题。
 
-由于同仓库 Pull Request workflow 会向受提交控制的构建步骤提供私有模块 token，`hami-cli` 的 write 权限不得授予无权读取 `hami-enterprise` 的用户。每次调整任一仓库的成员权限时都必须重新核对这一不变量；如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中需要 token 的 job，改用具备审批保护的凭据边界后再授予权限。
+### `GPUDevice` 更新发生冲突
 
-工作流会从两个公开下载前缀逐个下载并比对上传结果，避免把对象上传成功误当成用户已可下载。任一后端上传或公开验证失败时，发布任务都会停止。
+重新导出最新对象，确认当前资源池归属，再应用修改。不要删除 `metadata.resourceVersion`，也不要修改 `spec.identity`。
 
-## 厂商插件方向
+### 容器内认证失败
 
-项目只发布一个用户侧 `hami-cli` 二进制。NVIDIA、Ascend 等厂商适配将作为编译进同一二进制的厂商插件接入，不为每个厂商维护独立 CLI。
+检查 kubeconfig 是否依赖 `exec` 插件，以及 API Server 地址是否指向宿主机回环地址。依赖外部认证程序时，优先在宿主机运行二进制。
 
-厂商插件负责设备发现、宿主机前置检查、Core 定位、Docker 参数注入和临时状态清理。主程序负责统一命令合同、参数分隔、`--dry-run` 输出、进程退出码和信号处理。
+## 开发
 
-首个厂商插件开始实现前，需要先根据已经验证的 NVIDIA Docker PoC 固定插件合同。当前迁移不包含 Docker 参数注入，也不声明 NVIDIA 或 Ascend 已受支持。详细边界见 [架构说明](docs/architecture.md)。
+开发环境需要 Go 1.26.0 或更高的 Go 1.26 补丁版本，并需要读取私有资源池 API 模块。使用组织认可的 GitHub 凭据配置私有模块访问后，执行：
 
-## 迁移说明
+```bash
+GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go build -o bin/hami-cli .
+GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go test ./...
+```
 
-当前资源池实现来自 `hami-enterprise` 的 `epic/resource-pool-manager` 分支。迁移阶段保留原命令、输出和并发更新语义，并继续依赖独立发布的 `pkg/resourcepool/api` 模块。
+提交前运行仓库完整检查：
 
-从 `hami-enterprise` 删除旧目录、切换发布流水线和发布首个独立版本属于后续工作。完成这些操作前，需要先验证新仓库的独立构建、安装和发布流程。
+```bash
+make ci
+```
+
+发布渠道、Actions 配置和不可变发布约束见 [发布维护说明](docs/releasing.md)。厂商运行时插件的目标边界见 [架构说明](docs/architecture.md)。
 
 ## License
 
