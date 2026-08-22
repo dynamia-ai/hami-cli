@@ -165,6 +165,8 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 		}
 		return hamirun.Injection{}, fmt.Errorf("format Core bind mount: %w", err)
 	}
+	memoryLimit := strconv.FormatUint(memoryBytes, 10)
+	computeLimit := strconv.Itoa(request.Compute)
 
 	return hamirun.Injection{Args: []string{
 		"--gpus", "device=" + device,
@@ -175,8 +177,10 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 		"--env", "LD_PRELOAD=" + coreContainerPath,
 		"--env", "CUDA_REDIRECT=" + coreContainerPath,
 		"--env", "CUDA_DISABLE_CONTROL=false",
-		"--env", "CUDA_DEVICE_MEMORY_LIMIT=" + strconv.FormatUint(memoryBytes, 10),
-		"--env", "CUDA_DEVICE_SM_LIMIT=" + strconv.Itoa(request.Compute),
+		"--env", "CUDA_DEVICE_MEMORY_LIMIT=" + memoryLimit,
+		"--env", "CUDA_DEVICE_MEMORY_LIMIT_0=" + memoryLimit,
+		"--env", "CUDA_DEVICE_SM_LIMIT=" + computeLimit,
+		"--env", "CUDA_DEVICE_SM_LIMIT_0=" + computeLimit,
 		"--env", "CUDA_DEVICE_MEMORY_SHARED_CACHE=" + cacheContainerPath,
 		"--env", "GPU_CORE_UTILIZATION_POLICY=default",
 		"--env", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",

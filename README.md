@@ -124,7 +124,7 @@ hami-cli run \
 
 当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 
-CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。CLI 显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
+CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。CLI 显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`。当前单 GPU 合同把容器内设备索引固定为 `0`；CLI 同时设置全局显存、算力限制和同值的 `CUDA_DEVICE_MEMORY_LIMIT_0`、`CUDA_DEVICE_SM_LIMIT_0`，避免镜像中的 per-device `ENV` 优先覆盖全局值。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
 - 显式关闭 `no-new-privileges` 的 `--security-opt`；
