@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.vscode
+bin
+cover.out
+dist
+docs
+*.md
+!README.md
+我对 hami-lite 产品的看法.md

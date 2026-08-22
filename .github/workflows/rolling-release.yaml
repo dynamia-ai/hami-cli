@@ -1,0 +1,382 @@
+name: Rolling Release
+run-name: Rolling release ${{ github.event_name == 'workflow_dispatch' && inputs.branch || 'latest' }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to publish as a mutable branch version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BUILDX_VERSION: v0.36.1
+  BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  GOPRIVATE: github.com/dynamia-ai/*
+  GOLANGCI_LINT_VERSION: v2.13.1
+  GORELEASER_VERSION: v2.17.1
+  OSSUTIL_VERSION: 2.3.0
+  OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
+  IMAGE: ghcr.io/${{ github.repository_owner }}/hami-cli
+  ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL || 'https://storage.dynamia.ai/hami-cli' }}
+  S3_PUBLIC_DOWNLOAD_BASE_URL: ${{ vars.S3_PUBLIC_DOWNLOAD_BASE_URL }}
+
+jobs:
+  build:
+    name: Build rolling release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
+      image-digest: ${{ steps.image-archive.outputs.digest }}
+    steps:
+      - name: Require main workflow for manual publication
+        if: github.event_name == 'workflow_dispatch'
+        run: test "$GITHUB_REF" = refs/heads/main
+
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/heads/{0}', inputs.branch) || github.sha }}
+
+      - name: Resolve rolling version
+        id: release
+        shell: bash
+        env:
+          REQUESTED_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" = push ]]; then
+            test "$GITHUB_REF" = refs/heads/main
+            test "$revision" = "$GITHUB_SHA"
+            version=latest
+            source_ref=refs/heads/main
+          else
+            git check-ref-format --branch "$REQUESTED_BRANCH" >/dev/null
+            remote_ref="refs/remotes/origin/$REQUESTED_BRANCH"
+            git show-ref --verify --quiet "$remote_ref"
+            test "$(git rev-parse "$remote_ref")" = "$revision"
+
+            slug="$(printf '%s' "$REQUESTED_BRANCH" | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[._-]+//; s/[._-]+$//; s/-+/-/g')"
+            needs_hash=false
+            if [[ -z "$slug" ]]; then
+              slug=ref
+              needs_hash=true
+            elif [[ "$slug" != "$REQUESTED_BRANCH" || ${#slug} -gt 96 ]]; then
+              needs_hash=true
+            fi
+            if [[ "$needs_hash" = true ]]; then
+              hash="$(printf '%s' "$REQUESTED_BRANCH" | sha256sum | cut -c1-8)"
+              slug="${slug:0:96}-$hash"
+            fi
+            version="branch-$slug"
+            source_ref="refs/heads/$REQUESTED_BRANCH"
+          fi
+          [[ "$version" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Rolling release build'
+            echo
+            echo "- Version: \`$version\`"
+            echo "- Source: \`$source_ref\`"
+            echo "- Revision: \`$revision\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate private module credential
+        env:
+          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
+        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          install-only: true
+
+      - name: Run release checks
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: make ci
+
+      - name: Build snapshot artifacts with GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+
+      - name: Prepare image context from release binaries
+        run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Build mutable image archive
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ runner.temp }}/release-image
+          file: ${{ runner.temp }}/release-image/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/hami-cli-image.tar
+          tags: ${{ env.IMAGE }}:${{ steps.release.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.revision }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record mutable image digest
+        id: image-archive
+        run: |
+          set -euo pipefail
+          digest="$(tar -xOf "$RUNNER_TEMP/hami-cli-image.tar" index.json \
+            | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cp "$RUNNER_TEMP/hami-cli-image.tar" dist/hami-cli-image.tar
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload rolling release payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binaries-${{ steps.release.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/hami-cli-image.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish rolling release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: rolling-release-${{ needs.build.outputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    steps:
+      - name: Checkout trusted release tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+
+      - name: Download rolling release payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-binaries-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Validate trusted tooling and payload
+        env:
+          EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
+          EXPECTED_REVISION: ${{ needs.build.outputs.revision }}
+          VERSION: ${{ needs.build.outputs.version }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
+          [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERSION" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
+          digest="$(tar -xOf dist/hami-cli-image.tar index.json \
+            | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
+          test "$digest" = "$EXPECTED_DIGEST"
+          (
+            cd dist
+            sha256sum --check checksums.txt
+          )
+
+      - name: Validate publication credentials
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+        run: |
+          test -n "$ALIYUN_OSS_ACCESS_KEY_ID"
+          test -n "$ALIYUN_OSS_ACCESS_KEY_SECRET"
+          test -n "$ALIYUN_OSS_BUCKET"
+          test -n "$ALIYUN_OSS_ENDPOINT"
+          test -n "$ALIYUN_OSS_REGION"
+          test -n "$S3_ACCESS_KEY_ID"
+          test -n "$S3_SECRET_ACCESS_KEY"
+          test -n "$S3_BUCKET"
+          test -n "$S3_ENDPOINT"
+          test -n "$S3_REGION"
+          test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+          test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
+
+      - name: Attest binary archives
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Install ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          curl -fsSLo "$workdir/ossutil.zip" \
+            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/ossutil-${OSSUTIL_VERSION}-linux-amd64.zip"
+          echo "$OSSUTIL_SHA256  $workdir/ossutil.zip" | sha256sum --check --strict
+          unzip -q "$workdir/ossutil.zip" -d "$workdir"
+          sudo install -m 0755 \
+            "$workdir/ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
+          ossutil version
+
+      - name: Publish mutable artifacts to OSS
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash release-control/hack/publish-oss.sh mutable "$VERSION" dist
+
+      - name: Verify AWS CLI
+        run: |
+          aws --version
+          aws s3api put-object --generate-cli-skeleton input | jq -e 'has("IfNoneMatch")'
+
+      - name: Publish mutable artifacts to S3
+        env:
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: bash release-control/hack/publish-s3.sh mutable "$VERSION" dist
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish mutable image archive
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          skopeo copy --all --preserve-digests --authfile "$HOME/.docker/config.json" \
+            "oci-archive:$GITHUB_WORKSPACE/dist/hami-cli-image.tar" \
+            "docker://$IMAGE:$VERSION"
+
+      - name: Resolve and verify image digest
+        id: image
+        shell: bash
+        env:
+          EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
+          EXPECTED_REVISION: ${{ needs.build.outputs.revision }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE:$VERSION"
+          manifest="$(docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest}}')"
+          digest="$(jq -r '.digest' <<< "$manifest")"
+          test "$digest" = "$EXPECTED_DIGEST"
+          for platform in linux/amd64 linux/arm64; do
+            metadata="$(docker buildx imagetools inspect "$image_ref" \
+              --format "{{json (index .Image \"$platform\")}}")"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' <<< "$metadata")" = "$EXPECTED_REVISION"
+            test "$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$metadata")" = "$VERSION"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest mutable image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify public artifacts and image
+        shell: bash
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          for base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
+            [[ "$base_url" = https://* ]]
+            for file in dist/*.tar.gz dist/checksums.txt; do
+              verified=false
+              for attempt in {1..8}; do
+                if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \
+                  "$base_url/$VERSION/${file##*/}" \
+                  && cmp "$file" "$RUNNER_TEMP/${file##*/}"; then
+                  verified=true
+                  break
+                fi
+                [[ "$attempt" -lt 8 ]] && sleep 5
+              done
+              [[ "$verified" = true ]]
+            done
+          done
+          mkdir -p "$DOCKER_CONFIG"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null
+          docker buildx imagetools inspect --raw "$IMAGE:$VERSION" > "$RUNNER_TEMP/image-index.json"
+          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
+          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
