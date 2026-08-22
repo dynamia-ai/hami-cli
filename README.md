@@ -1,6 +1,6 @@
 # hami-cli
 
-`hami-cli` 是 HAMi 的统一命令行入口。源码仓库保持私有，正式版本通过公开的 OSS 二进制下载和 GHCR 容器镜像分发。当前版本已从 `hami-enterprise/cmd/hami-cli` 迁入资源池管理能力；Docker 场景下的厂商运行时插件尚未实现。
+`hami-cli` 是 HAMi 的统一命令行入口。源码仓库保持私有，正式版本通过公开的 OSS 二进制下载和受限访问的 GHCR 容器镜像分发。当前版本已从 `hami-enterprise/cmd/hami-cli` 迁入资源池管理能力；Docker 场景下的厂商运行时插件尚未实现。
 
 ## 当前能力
 
@@ -74,7 +74,13 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
 
 ## Docker
 
-容器镜像支持 `linux/amd64` 和 `linux/arm64`。首次创建 GHCR package 后，仓库管理员需要在 package 设置中取消继承私有仓库权限，并将可见性设为 `Public`；这是 GitHub 对新 package 的一次性默认限制。Release workflow 会以匿名身份验证镜像。镜像未公开时，workflow 会失败；完成设置后，只需重新运行失败的 job。之后可匿名拉取和运行：
+容器镜像支持 `linux/amd64` 和 `linux/arm64`。GHCR package 保持私有；拉取前需要使用对该 package 有读取权限的 GitHub 用户，以及包含 `read:packages` scope 的 personal access token (classic) 登录。组织启用 SSO 时，还需要为该 token 授权 SSO：
+
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u GITHUB_USERNAME --password-stdin
+```
+
+登录后可运行稳定版本：
 
 ```bash
 docker run --rm ghcr.io/dynamia-ai/hami-cli:v1.2.3 version
@@ -102,7 +108,7 @@ kubeconfig 中的 API Server 地址必须能从容器网络访问；指向宿主
 
 ## 发布配置
 
-Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。GoReleaser 统一生成五个平台归档和 SHA-256 校验文件；Actions 只负责触发策略、凭据、对象存储、GHCR 和公开可用性验证。发布分为三个通道：
+Pull Request 和 `main` 分支使用同一组本地 `make ci`、容器构建和冒烟测试合同。GoReleaser 统一生成五个平台归档和 SHA-256 校验文件；Actions 只负责触发策略、凭据、对象存储公开可用性验证和登录态 GHCR 校验。发布分为三个通道：
 
 - 稳定标签 `vX.Y.Z`：向 OSS 和 S3 兼容存储发布不可变归档及容器镜像 digest，并创建仅授权用户可访问的 GitHub Release 副本。GHCR 同名标签是经过发布时校验的便捷引用，不属于不可变合同。
 - `main` 每次更新：覆盖发布 OSS、S3 兼容存储和 GHCR 的 `latest`，并在该 workflow run 中保留名为 `release-binaries-latest` 的 Actions artifact。

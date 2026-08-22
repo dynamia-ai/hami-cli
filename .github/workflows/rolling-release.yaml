@@ -337,10 +337,9 @@ jobs:
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public artifacts and image
+      - name: Verify public artifacts
         shell: bash
         env:
-          DOCKER_CONFIG: ${{ runner.temp }}/anonymous-docker
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
@@ -360,8 +359,3 @@ jobs:
               [[ "$verified" = true ]]
             done
           done
-          mkdir -p "$DOCKER_CONFIG"
-          docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null
-          docker buildx imagetools inspect --raw "$IMAGE:$VERSION" > "$RUNNER_TEMP/image-index.json"
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
-          test "$(jq '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length' "$RUNNER_TEMP/image-index.json")" = 1
