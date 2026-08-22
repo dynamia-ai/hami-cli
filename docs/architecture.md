@@ -77,9 +77,9 @@ NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前
 
 清理辅助进程通过继承的生命周期管道等待前台 Docker 客户端退出，随后删除快照目录。插件要求 `--rm`，并拒绝 `--detach` 和非 `no` 的 restart policy，使容器生命周期不超过快照生命周期。
 
-插件设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。插件还设置 `no-new-privileges=true`，阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升进入 secure-execution 模式并忽略 `LD_PRELOAD`。调用方不能关闭该选项。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
+插件设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。插件显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`；调用方也不能通过 Docker 参数覆盖这些值。插件还设置 `no-new-privileges=true`，阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升进入 secure-execution 模式并忽略 `LD_PRELOAD`。调用方不能关闭该选项。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
 
-Docker 参数检查会拒绝所有调用方提供的 `--device`，因为 CLI 无法保证 Docker daemon 打开的设备路径仍指向校验时的 inode。插件也会拒绝可能授权 NVIDIA 字符设备的 device cgroup 规则。`--env-file` 和 `--label-file` 必须引用普通文件；插件在读取文件前拒绝 FIFO、设备文件和其他特殊文件，并检查 label 文件中的裸键。插件还拒绝无法静态检查继承挂载目标的 `--volumes-from`，并把 `CUDA_DISABLE_CONTROL` 作为 HAMi Core 受保护环境变量。
+Docker 参数检查会拒绝所有调用方提供的 `--device`，因为 CLI 无法保证 Docker daemon 打开的设备路径仍指向校验时的 inode。插件也会拒绝可能授权 NVIDIA 字符设备的 device cgroup 规则。`--env-file` 和 `--label-file` 必须引用普通文件；插件在读取文件前拒绝 FIFO、设备文件和其他特殊文件，并检查 label 文件中的裸键。插件还拒绝无法静态检查继承挂载目标的 `--volumes-from`，并把 `CUDA_DISABLE_CONTROL` 和 `GPU_CORE_UTILIZATION_POLICY` 作为 HAMi Core 受保护环境变量。
 
 插件不负责本机容量账本、多容器调度、超售控制、抢占或崩溃恢复。这些能力属于 HAMi 或 HAMi Enterprise 控制面。
 

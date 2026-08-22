@@ -124,13 +124,13 @@ hami-cli run \
 
 当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 
-CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
+CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。CLI 显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
 - 显式关闭 `no-new-privileges` 的 `--security-opt`；
 - `--detach`、缺少 `--rm` 或非 `no` 的 restart policy；
 - 所有调用方提供的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；
-- HAMi Core 使用的环境变量（包括会关闭隔离的 `CUDA_DISABLE_CONTROL`），或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
+- HAMi Core 使用的环境变量（包括会关闭隔离的 `CUDA_DISABLE_CONTROL` 和会跳过算力限制的 `GPU_CORE_UTILIZATION_POLICY`），或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
 - 暴露 NVIDIA 设备、`--volumes-from`，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
 - `io.hami.lite.*` 管理标签。
 
