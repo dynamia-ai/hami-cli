@@ -29,7 +29,7 @@ NVIDIA PoC 已实现以下共享合同：
 - 真实执行时，固定并挂载通过校验的 Core 字节快照；
 - 固定并校验 `--env-file` 和 `--label-file`，避免 Docker 读取校验后的路径替换；
 - 检测会覆盖 GPU、Core 环境变量、挂载路径和管理标签的 Docker 参数；
-- `--dry-run` 输出经过 POSIX shell quoting 的可复制命令；
+- `--dry-run` 输出经过 POSIX shell quoting 的可复制命令，并保留 Core bind mount 的 SELinux 私有 relabel 选项；
 - 实际执行通过 `exec` 替换当前进程，保留 Docker 的标准输入输出、退出码和信号。
 
 当前只支持 Linux/AMD64、glibc 镜像、rootful 本机 Docker、NVIDIA、单物理 GPU、前台 `--rm` 容器和受信任工作负载。远端 Docker daemon、detached/restartable 容器、Ascend、多 GPU、MIG、ARM64、rootless、Windows 和 macOS 尚未实现或验证。
@@ -73,13 +73,13 @@ NVIDIA 插件当前使用以下参数：
 
 NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。插件拒绝位于 `noexec` 文件系统的临时目录。Docker 使用私有 `Z` label 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`，使 SELinux 容器可以加载快照。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
 
-同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 不创建快照；输出引用调用时校验的原始路径，并且不修改原始文件的 SELinux label。
+同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 本身不创建快照，也不修改原始文件的 SELinux label。dry-run 输出使用 `--volume <原始路径>:/usr/local/vgpu/libvgpu.so:ro,Z`；执行该输出时，Docker 会对原始 Core 应用私有 SELinux relabel。该命令不具备真实执行路径的字节快照固定保证。
 
 清理辅助进程通过继承的生命周期管道等待前台 Docker 客户端退出，随后删除快照目录。插件要求 `--rm`，并拒绝 `--detach` 和非 `no` 的 restart policy，使容器生命周期不超过快照生命周期。
 
-插件设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
+插件设置 `LD_PRELOAD` 与 `CUDA_REDIRECT`，并保证 `NVIDIA_DRIVER_CAPABILITIES` 至少包含 `compute` 和 `utility`。插件还设置 `no-new-privileges=true`，阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升进入 secure-execution 模式并忽略 `LD_PRELOAD`。调用方不能关闭该选项。显存、算力和共享缓存分别使用 `CUDA_DEVICE_MEMORY_LIMIT`、`CUDA_DEVICE_SM_LIMIT` 和 `CUDA_DEVICE_MEMORY_SHARED_CACHE`。缓存目录 `/tmp/hami-lite` 与锁目录 `/tmp/vgpulock` 使用 Docker tmpfs，由容器生命周期回收，不在宿主机保留 CLI 临时状态。
 
-Docker 参数检查会拒绝直接或通过设备 cgroup 规则授权 NVIDIA 字符设备的配置。`--env-file` 和 `--label-file` 必须引用普通文件；插件在读取文件前拒绝 FIFO、设备文件和其他特殊文件，并检查 label 文件中的裸键。插件还拒绝无法静态检查继承挂载目标的 `--volumes-from`。
+Docker 参数检查会拒绝所有调用方提供的 `--device`，因为 CLI 无法保证 Docker daemon 打开的设备路径仍指向校验时的 inode。插件也会拒绝可能授权 NVIDIA 字符设备的 device cgroup 规则。`--env-file` 和 `--label-file` 必须引用普通文件；插件在读取文件前拒绝 FIFO、设备文件和其他特殊文件，并检查 label 文件中的裸键。插件还拒绝无法静态检查继承挂载目标的 `--volumes-from`，并把 `CUDA_DISABLE_CONTROL` 作为 HAMi Core 受保护环境变量。
 
 插件不负责本机容量账本、多容器调度、超售控制、抢占或崩溃恢复。这些能力属于 HAMi 或 HAMi Enterprise 控制面。
 

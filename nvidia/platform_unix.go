@@ -25,14 +25,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func inspectDockerDeviceSource(source string) (bool, error) {
-	var stat unix.Stat_t
-	if err := unix.Stat(source, &stat); err != nil {
-		return false, err
-	}
-	return stat.Mode&unix.S_IFMT == unix.S_IFCHR && unix.Major(uint64(stat.Rdev)) == nvidiaDeviceMajor, nil
-}
-
 func openRegularAssignmentFile(filename string) (*os.File, error) {
 	fd, err := unix.Open(filename, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {

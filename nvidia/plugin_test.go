@@ -214,7 +214,8 @@ func TestInjectBuildsNVIDIAContract(t *testing.T) {
 	joined := strings.Join(injection.Args, "\n")
 	for _, want := range []string{
 		"--gpus\ndevice=0",
-		"dst=/usr/local/vgpu/libvgpu.so",
+		"--security-opt\nno-new-privileges=true",
+		"--volume\n" + request.Core.Path + ":/usr/local/vgpu/libvgpu.so:ro,Z",
 		"type=tmpfs,dst=/tmp/hami-lite,tmpfs-mode=1777",
 		"type=tmpfs,dst=/tmp/vgpulock,tmpfs-mode=1777",
 		"LD_PRELOAD=/usr/local/vgpu/libvgpu.so",
@@ -245,11 +246,15 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 		{name: "gpus", args: []string{"--gpus", "all", "image"}, want: "--gpus"},
 		{name: "runtime", args: []string{"--runtime=runc", "image"}, want: "runtime"},
 		{name: "privileged", args: []string{"--privileged", "image"}, want: "--privileged"},
+		{name: "disable no new privileges", args: []string{"--security-opt", "no-new-privileges=false", "image"}, want: "no-new-privileges=true"},
+		{name: "disable no new privileges legacy syntax", args: []string{"--security-opt=no-new-privileges:false", "image"}, want: "no-new-privileges=true"},
+		{name: "non-NVIDIA device", args: []string{"--device", os.DevNull, "image"}, want: "cannot be pinned"},
 		{name: "NVIDIA device", args: []string{"--device", "/dev/nvidia0", "image"}, want: "--device"},
 		{name: "NVIDIA device alias", args: []string{"--device", "/dev/char/195:1:/dev/altgpu", "image"}, want: "--device"},
 		{name: "NVIDIA device cgroup rule", args: []string{"--device-cgroup-rule", "c 195:* rmw", "image"}, want: "--device-cgroup-rule"},
 		{name: "inherited volumes", args: []string{"--volumes-from", "other", "image"}, want: "--volumes-from"},
 		{name: "environment", args: []string{"--env", "LD_PRELOAD=/bad.so", "image"}, want: "LD_PRELOAD"},
+		{name: "disable control environment", args: []string{"--env", "CUDA_DISABLE_CONTROL=true", "image"}, want: "CUDA_DISABLE_CONTROL"},
 		{name: "short environment", args: []string{"-eCUDA_DEVICE_SM_LIMIT=90", "image"}, want: "CUDA_DEVICE_SM_LIMIT"},
 		{name: "per-device environment", args: []string{"-e", "CUDA_DEVICE_MEMORY_LIMIT_0=1g", "image"}, want: "CUDA_DEVICE_MEMORY_LIMIT_0"},
 		{name: "driver capabilities", args: []string{"-e", "NVIDIA_DRIVER_CAPABILITIES=video,utility", "image"}, want: "compute and utility"},
@@ -273,6 +278,24 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 	}
 }
 
+func TestInjectAcceptsEnabledNoNewPrivilegesForms(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"no-new-privileges",
+		"no-new-privileges=true",
+		"no-new-privileges:true",
+	} {
+		value := value
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			request := testRequest(t, []string{"docker", "run", "--security-opt", value, "image"})
+			if _, err := New().Inject(t.Context(), request); err != nil {
+				t.Fatalf("Inject() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestInjectInspectsEnvAndLabelFiles(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -282,6 +305,7 @@ func TestInjectInspectsEnvAndLabelFiles(t *testing.T) {
 		want    string
 	}{
 		{name: "env file", flag: "--env-file", content: "SAFE=1\nLD_PRELOAD=/bad.so\n", want: "LD_PRELOAD"},
+		{name: "env file disables control", flag: "--env-file", content: "SAFE=1\nCUDA_DISABLE_CONTROL=true\n", want: "CUDA_DISABLE_CONTROL"},
 		{name: "env file with BOM", flag: "--env-file", content: "\uFEFFLD_PRELOAD=/bad.so\n", want: "LD_PRELOAD"},
 		{name: "env file capabilities", flag: "--env-file", content: "NVIDIA_DRIVER_CAPABILITIES=compute\n", want: "compute and utility"},
 		{name: "label file", flag: "--label-file", content: "safe=true\nio.hami.lite.managed=false\n", want: "io.hami.lite.managed"},
@@ -317,7 +341,7 @@ func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 	t.Parallel()
 	request := testRequest(t, []string{
 		"docker", "run", "--runtime=nvidia", "--privileged=false", "--disable-content-trust", "-i=false",
-		"--future-flag=value", "--device", os.DevNull, "--env", "SAFE=value",
+		"--future-flag=value", "--security-opt", "no-new-privileges=true", "--env", "SAFE=value",
 		"--device-cgroup-rule", "c 1:3 rw",
 		"--net", "host",
 		"--env", "NVIDIA_DRIVER_CAPABILITIES=all",

@@ -19,14 +19,9 @@ limitations under the License.
 package nvidia
 
 import (
-	"errors"
 	"fmt"
 	"os"
 )
-
-func inspectDockerDeviceSource(string) (bool, error) {
-	return false, errors.New("device source inspection is unsupported on this platform")
-}
 
 func openRegularAssignmentFile(filename string) (*os.File, error) {
 	info, err := os.Stat(filename)

@@ -105,7 +105,7 @@ hami-cli run \
 
 `CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
 
-`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 输出引用调用时校验的原始路径，不会为后续执行保留文件快照，也不会修改原始文件的 SELinux label：
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 本身不会创建文件快照或修改 SELinux label。输出命令引用调用时校验的原始 Core 路径，并包含 `:ro,Z`。执行该输出时，Docker 会对原始 Core 应用私有 SELinux relabel；该命令不具备真实执行路径的字节快照固定保证：
 
 ```bash
 hami-cli run \
@@ -124,12 +124,13 @@ hami-cli run \
 
 当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 
-CLI 在 `docker run` 后插入 `--gpus`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
+CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
+- 显式关闭 `no-new-privileges` 的 `--security-opt`；
 - `--detach`、缺少 `--rm` 或非 `no` 的 restart policy；
-- 指向 NVIDIA 设备的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；
-- HAMi Core 使用的环境变量，或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
+- 所有调用方提供的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；
+- HAMi Core 使用的环境变量（包括会关闭隔离的 `CUDA_DISABLE_CONTROL`），或不同时包含 `compute` 和 `utility` 的 `NVIDIA_DRIVER_CAPABILITIES`；
 - 暴露 NVIDIA 设备、`--volumes-from`，或与 `/usr/local/vgpu/libvgpu.so`、`/tmp/hami-lite`、`/tmp/vgpulock` 重叠的挂载；
 - `io.hami.lite.*` 管理标签。
 

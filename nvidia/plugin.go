@@ -52,6 +52,7 @@ const (
 
 var (
 	protectedEnvironment = map[string]struct{}{
+		"CUDA_DISABLE_CONTROL":            {},
 		"CUDA_DEVICE_MEMORY_LIMIT":        {},
 		"CUDA_DEVICE_MEMORY_SHARED_CACHE": {},
 		"CUDA_DEVICE_SM_LIMIT":            {},
@@ -157,19 +158,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	}
 	cleanup = combineCleanups(optionCleanup, cleanup)
 
-	coreMountOption := "--mount"
-	var coreMountValue string
-	if request.DryRun {
-		coreMountValue, err = mountValue(
-			"type=bind",
-			"src="+corePath,
-			"dst="+coreContainerPath,
-			"readonly",
-		)
-	} else {
-		coreMountOption = "--volume"
-		coreMountValue, err = coreVolumeValue(corePath)
-	}
+	coreMountValue, err := coreVolumeValue(corePath)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -179,7 +168,8 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 
 	return hamirun.Injection{Args: []string{
 		"--gpus", "device=" + device,
-		coreMountOption, coreMountValue,
+		"--security-opt", "no-new-privileges=true",
+		"--volume", coreMountValue,
 		"--mount", "type=tmpfs,dst=" + stateContainerPath + ",tmpfs-mode=1777",
 		"--mount", "type=tmpfs,dst=" + lockContainerPath + ",tmpfs-mode=1777",
 		"--env", "LD_PRELOAD=" + coreContainerPath,
@@ -495,10 +485,12 @@ func validateDockerOptions(args []string) error {
 			if option.value != "no" {
 				return fmt.Errorf("docker restart policy %q is unsupported because the Core snapshot is scoped to one foreground run", option.value)
 			}
-		case "--device":
-			if err := validateDockerDevice(option.value); err != nil {
+		case "--security-opt":
+			if err := validateSecurityOption(option.value); err != nil {
 				return err
 			}
+		case "--device":
+			return fmt.Errorf("docker option --device=%q cannot be pinned for inspection and conflicts with the HAMi runtime contract", option.value)
 		case "--device-cgroup-rule":
 			if err := validateDeviceCgroupRule(option.value); err != nil {
 				return err
@@ -547,24 +539,24 @@ func validateDockerOptions(args []string) error {
 	return nil
 }
 
-func validateDockerDevice(value string) error {
-	parts := strings.SplitN(value, ":", 4)
-	if len(parts) == 4 || parts[0] == "" {
-		return fmt.Errorf("cannot safely inspect Docker option --device=%q", value)
+func validateSecurityOption(value string) error {
+	const optionName = "no-new-privileges"
+	if value == optionName {
+		return nil
 	}
-	if strings.Contains(strings.ToLower(value), "nvidia") {
-		return fmt.Errorf("docker option --device=%q conflicts with HAMi GPU selection", value)
+	name, booleanValue, found := strings.Cut(value, "=")
+	if !found {
+		name, booleanValue, found = strings.Cut(value, ":")
 	}
-	source := parts[0]
-	if !filepath.IsAbs(source) {
-		return fmt.Errorf("cannot safely inspect Docker option --device source %q", source)
+	if !found || name != optionName {
+		return nil
 	}
-	isNVIDIADevice, err := inspectDockerDeviceSource(source)
+	enabled, err := strconv.ParseBool(booleanValue)
 	if err != nil {
-		return fmt.Errorf("inspect Docker option --device source %q: %w", source, err)
+		return fmt.Errorf("docker security option %q has an invalid boolean value", value)
 	}
-	if isNVIDIADevice {
-		return fmt.Errorf("docker option --device=%q grants NVIDIA device major %d and conflicts with HAMi GPU selection", value, nvidiaDeviceMajor)
+	if !enabled {
+		return fmt.Errorf("docker security option %q conflicts with HAMi's required no-new-privileges=true contract", value)
 	}
 	return nil
 }
@@ -791,19 +783,6 @@ func protectedTarget(target string) bool {
 		}
 	}
 	return false
-}
-
-func mountValue(fields ...string) (string, error) {
-	var output strings.Builder
-	writer := csv.NewWriter(&output)
-	if err := writer.Write(fields); err != nil {
-		return "", err
-	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(output.String(), "\n"), nil
 }
 
 var longOptionsWithValues = map[string]struct{}{
