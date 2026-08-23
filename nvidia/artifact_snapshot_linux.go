@@ -127,7 +127,7 @@ func startArtifactCleanupProcess(directory string) (*os.File, error) {
 	if err != nil {
 		return fail(err)
 	}
-	command := exec.Command(executable)
+	command := exec.Command(executable, artifactCleanupArgument)
 	command.Env = append(os.Environ(),
 		artifactCleanupFDEnvironment+"=3",
 		artifactCleanupDirectoryEnvironment+"="+directory,

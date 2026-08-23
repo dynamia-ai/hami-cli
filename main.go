@@ -61,19 +61,28 @@ const (
 )
 
 func main() {
-	if nvidia.RunArtifactCleanupFromEnvironment() {
-		return
-	}
-	options := &commandOptions{
-		out:      os.Stdout,
-		errOut:   os.Stderr,
-		stdinTTY: term.IsTerminal(int(os.Stdin.Fd())),
-	}
-	command := newRootCommand(options)
-	if err := command.Execute(); err != nil {
+	if err := runMain(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func runMain(arguments []string, out, errOut io.Writer) error {
+	cleanupHandled, err := nvidia.RunArtifactCleanupFromEnvironment(arguments)
+	if err != nil {
+		return err
+	}
+	if cleanupHandled {
+		return nil
+	}
+	options := &commandOptions{
+		out:      out,
+		errOut:   errOut,
+		stdinTTY: term.IsTerminal(int(os.Stdin.Fd())),
+	}
+	command := newRootCommand(options)
+	command.SetArgs(arguments)
+	return command.Execute()
 }
 
 func newRootCommand(options *commandOptions) *cobra.Command {

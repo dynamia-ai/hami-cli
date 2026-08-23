@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,6 +49,29 @@ func TestRootCommandUsesKubectlPluginDisplayNameAndStandardFlags(t *testing.T) {
 		if command.PersistentFlags().Lookup(name) == nil {
 			t.Errorf("missing standard Kubernetes flag --%s", name)
 		}
+	}
+}
+
+func TestRunMainRejectsInvalidArtifactCleanupHelperState(t *testing.T) {
+	t.Setenv("_HAMI_CLI_ARTIFACT_CLEANUP_FD", "not-a-descriptor")
+	t.Setenv("_HAMI_CLI_ARTIFACT_CLEANUP_DIRECTORY", filepath.Join(os.TempDir(), "hami-cli-core-stale"))
+
+	err := runMain([]string{"--hami-cli-internal-artifact-cleanup"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid Core snapshot cleanup descriptor") {
+		t.Fatalf("runMain() error = %v, want invalid cleanup descriptor", err)
+	}
+}
+
+func TestRunMainIgnoresStaleArtifactCleanupEnvironment(t *testing.T) {
+	t.Setenv("_HAMI_CLI_ARTIFACT_CLEANUP_FD", "not-a-descriptor")
+	t.Setenv("_HAMI_CLI_ARTIFACT_CLEANUP_DIRECTORY", filepath.Join(os.TempDir(), "hami-cli-core-stale"))
+	output := &bytes.Buffer{}
+
+	if err := runMain([]string{"version"}, output, io.Discard); err != nil {
+		t.Fatalf("runMain() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "version:") {
+		t.Fatalf("runMain() output = %q, want version command output", output.String())
 	}
 }
 

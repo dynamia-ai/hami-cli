@@ -20,6 +20,7 @@ package nvidia
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,6 +145,12 @@ func TestArtifactCleanupProcessRemovesDirectoryAfterLifetimeCloses(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := lifetime.Write([]byte("still-active")); err != nil {
+		t.Fatalf("write lifetime marker: %v", err)
+	}
+	if _, err := os.Stat(directory); err != nil {
+		t.Fatalf("snapshot directory removed while lifetime was open: %v", err)
+	}
 	if err := lifetime.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -160,5 +167,33 @@ func TestArtifactCleanupProcessRemovesDirectoryAfterLifetimeCloses(t *testing.T)
 			t.Fatal("cleanup process did not remove the snapshot directory")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestArtifactCleanupProcessRejectsWriteEndpointWithoutRemovingDirectory(t *testing.T) {
+	directory, err := os.MkdirTemp("", artifactSnapshotPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(directory) }()
+	readLifetime, writeLifetime, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readLifetime.Close()
+	defer writeLifetime.Close()
+
+	command := exec.Command(os.Args[0], artifactCleanupArgument)
+	command.Env = append(os.Environ(),
+		artifactCleanupFDEnvironment+"=3",
+		artifactCleanupDirectoryEnvironment+"="+directory,
+	)
+	command.ExtraFiles = []*os.File{writeLifetime}
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "expected a read-only pipe endpoint") {
+		t.Fatalf("cleanup helper error = %v, output = %q, want write-end rejection", err, output)
+	}
+	if _, err := os.Stat(directory); err != nil {
+		t.Fatalf("snapshot directory removed after invalid helper state: %v", err)
 	}
 }

@@ -17,16 +17,62 @@ limitations under the License.
 package nvidia
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestMain(m *testing.M) {
-	if RunArtifactCleanupFromEnvironment() {
+	cleanupHandled, err := RunArtifactCleanupFromEnvironment(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if cleanupHandled {
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func TestRunArtifactCleanupFromEnvironmentRejectsInvalidState(t *testing.T) {
+	t.Setenv(artifactCleanupFDEnvironment, "not-a-descriptor")
+	t.Setenv(artifactCleanupDirectoryEnvironment, filepath.Join(os.TempDir(), artifactSnapshotPrefix+"stale"))
+
+	handled, err := RunArtifactCleanupFromEnvironment([]string{artifactCleanupArgument})
+	if err == nil || !strings.Contains(err.Error(), "invalid Core snapshot cleanup descriptor") {
+		t.Fatalf("RunArtifactCleanupFromEnvironment() error = %v, want invalid descriptor", err)
+	}
+	if handled {
+		t.Fatal("invalid cleanup state was reported as handled")
+	}
+}
+
+func TestRunArtifactCleanupFromEnvironmentRequiresExplicitHelperArgument(t *testing.T) {
+	t.Setenv(artifactCleanupFDEnvironment, "not-a-descriptor")
+	t.Setenv(artifactCleanupDirectoryEnvironment, filepath.Join(os.TempDir(), artifactSnapshotPrefix+"stale"))
+
+	handled, err := RunArtifactCleanupFromEnvironment([]string{"version"})
+	if err != nil {
+		t.Fatalf("RunArtifactCleanupFromEnvironment() error = %v", err)
+	}
+	if handled {
+		t.Fatal("cleanup environment without the private helper argument was handled")
+	}
+}
+
+func TestRunArtifactCleanupFromEnvironmentRejectsInvalidDirectory(t *testing.T) {
+	t.Setenv(artifactCleanupFDEnvironment, "3")
+	t.Setenv(artifactCleanupDirectoryEnvironment, filepath.Join(os.TempDir(), "not-a-hami-snapshot"))
+
+	handled, err := RunArtifactCleanupFromEnvironment([]string{artifactCleanupArgument})
+	if err == nil || !strings.Contains(err.Error(), "invalid Core snapshot cleanup directory") {
+		t.Fatalf("RunArtifactCleanupFromEnvironment() error = %v, want invalid directory", err)
+	}
+	if handled {
+		t.Fatal("invalid cleanup directory was reported as handled")
+	}
 }
 
 func TestSafeArtifactSnapshotDirectory(t *testing.T) {
