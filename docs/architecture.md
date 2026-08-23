@@ -71,7 +71,7 @@ NVIDIA 插件当前使用以下参数：
 - 检测会破坏 Core 注入合同的 Docker 参数冲突；
 - 提供厂商特有的诊断信息。
 
-NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。插件拒绝位于 `noexec` 文件系统的临时目录。Docker 使用私有 `Z` label 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`，使 SELinux 容器可以加载快照。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
+NVIDIA 插件在实际执行前解析 `DOCKER_CONTEXT`、`DOCKER_HOST` 和当前 Docker context，确认 Docker 将使用本机 `unix://` endpoint，并通过 `nvidia-smi` 校验所选 GPU。插件固定注入 `--platform linux/amd64`，使 Docker 从多架构镜像中解析与 Core 一致的平台变体，并拒绝调用方显式指定其他容器平台。真实执行时，插件先把 Core 复制到权限为 `0700` 的绝对临时目录，再从同一个权限为 `0444` 的只读快照完成 SHA-256 和 ELF 校验。ELF 校验除架构、类型、可执行加载段和动态段外，还要求动态字符串表、动态符号表及 System V 或 GNU 哈希表位于文件支持的加载范围内，避免只含 `DT_NULL` 的伪共享对象进入 `LD_PRELOAD`。插件拒绝位于 `noexec` 文件系统的临时目录。Docker 使用私有 `Z` label 把该快照只读挂载到 `/usr/local/vgpu/libvgpu.so`，使 SELinux 容器可以加载快照。CLI 不会在校验后重新按原始路径打开 Core，避免原始路径内容在校验与挂载之间变化。
 
 同一快照机制用于 `--env-file` 和 `--label-file`。插件先复制文件，再校验快照内容，并把 Docker argv 中的原始路径替换为快照路径。dry-run 本身不创建快照，也不修改原始文件的 SELinux label。dry-run 输出使用 `--volume <原始路径>:/usr/local/vgpu/libvgpu.so:ro,z`；执行该输出时，Docker 会对原始 Core 应用可供多个容器共享的 SELinux relabel，避免并发执行引用同一 Core 的命令时互相替换私有 MCS label。该命令不具备真实执行路径的字节快照固定保证。
 

@@ -124,7 +124,7 @@ func TestRunCommandNVIDIADryRun(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	for _, want := range []string{
-		"docker run --gpus device=0",
+		"docker run --platform linux/amd64 --gpus device=0",
 		"CUDA_DEVICE_MEMORY_LIMIT=8589934592",
 		"NVIDIA_DRIVER_CAPABILITIES=compute,utility",
 		"--rm image command 'value with spaces'",
@@ -140,10 +140,17 @@ func testRunCommandELFSharedObject() []byte {
 		headerSize        = 64
 		programHeaderSize = 56
 		dynamicEntrySize  = 16
+		dynamicEntryCount = 6
+		hashTableSize     = 16
+		symbolEntrySize   = 24
 		programCount      = 2
 	)
 	dynamicOffset := headerSize + programCount*programHeaderSize
-	content := make([]byte, dynamicOffset+dynamicEntrySize)
+	dynamicSize := dynamicEntryCount * dynamicEntrySize
+	hashOffset := dynamicOffset + dynamicSize
+	symbolOffset := hashOffset + hashTableSize
+	stringOffset := symbolOffset + symbolEntrySize
+	content := make([]byte, stringOffset+1)
 	copy(content, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0})
 	binary.LittleEndian.PutUint16(content[16:], 3)  // ET_DYN
 	binary.LittleEndian.PutUint16(content[18:], 62) // EM_X86_64
@@ -166,6 +173,18 @@ func testRunCommandELFSharedObject() []byte {
 		binary.LittleEndian.PutUint64(content[base+48:], alignment)
 	}
 	writeProgramHeader(0, 1, 5, 0, uint64(len(content)), 0x1000)
-	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), dynamicEntrySize, 8)
+	writeProgramHeader(1, 2, 6, uint64(dynamicOffset), uint64(dynamicSize), 8)
+	writeDynamic := func(index int, tag, value uint64) {
+		base := dynamicOffset + index*dynamicEntrySize
+		binary.LittleEndian.PutUint64(content[base:], tag)
+		binary.LittleEndian.PutUint64(content[base+8:], value)
+	}
+	writeDynamic(0, 4, uint64(hashOffset))   // DT_HASH
+	writeDynamic(1, 5, uint64(stringOffset)) // DT_STRTAB
+	writeDynamic(2, 6, uint64(symbolOffset)) // DT_SYMTAB
+	writeDynamic(3, 10, 1)                   // DT_STRSZ
+	writeDynamic(4, 11, symbolEntrySize)     // DT_SYMENT
+	binary.LittleEndian.PutUint32(content[hashOffset:], 1)
+	binary.LittleEndian.PutUint32(content[hashOffset+4:], 1)
 	return content
 }

@@ -43,11 +43,13 @@ import (
 )
 
 const (
-	coreContainerPath  = "/usr/local/vgpu/libvgpu.so"
-	stateContainerPath = "/tmp/hami-lite"
-	lockContainerPath  = "/tmp/vgpulock"
-	cacheContainerPath = stateContainerPath + "/cudevshr.cache"
-	nvidiaDeviceMajor  = 195
+	coreContainerPath      = "/usr/local/vgpu/libvgpu.so"
+	stateContainerPath     = "/tmp/hami-lite"
+	lockContainerPath      = "/tmp/vgpulock"
+	cacheContainerPath     = stateContainerPath + "/cudevshr.cache"
+	requiredDockerPlatform = "linux/amd64"
+	elf64DynamicSymbolSize = 24
+	nvidiaDeviceMajor      = 195
 )
 
 var (
@@ -169,6 +171,7 @@ func (plugin *Plugin) Inject(ctx context.Context, request hamirun.Request) (hami
 	computeLimit := strconv.Itoa(request.Compute)
 
 	return hamirun.Injection{Args: []string{
+		"--platform", requiredDockerPlatform,
 		"--gpus", "device=" + device,
 		"--security-opt", "no-new-privileges=true",
 		"--volume", coreMountValue,
@@ -327,7 +330,7 @@ func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) 
 			absPath, core.Class, core.Data, core.Machine, core.Type,
 		)
 	}
-	if err := validateLoadableSharedLibrary(core); err != nil {
+	if err := validateLoadableSharedLibrary(core, uint64(info.Size())); err != nil {
 		return "", "", "", nil, fmt.Errorf("core artifact %q must be a loadable shared library: %w", absPath, err)
 	}
 	if snapshotter == nil {
@@ -337,7 +340,7 @@ func verifyArtifact(artifact hamirun.Artifact, snapshotter artifactSnapshotter) 
 	return mountPath, version, gotDigest, cleanup, nil
 }
 
-func validateLoadableSharedLibrary(core *elf.File) error {
+func validateLoadableSharedLibrary(core *elf.File, fileSize uint64) error {
 	loadSegments := make([]*elf.Prog, 0)
 	hasExecutableLoad := false
 	var dynamicSegment *elf.Prog
@@ -377,6 +380,8 @@ func validateLoadableSharedLibrary(core *elf.File) error {
 
 	reader := dynamicSegment.Open()
 	entry := make([]byte, 16)
+	dynamicValues := make(map[elf.DynTag]uint64)
+	terminated := false
 	for offset := uint64(0); offset < dynamicSegment.Filesz; offset += uint64(len(entry)) {
 		if _, err := io.ReadFull(reader, entry); err != nil {
 			return fmt.Errorf("read ELF dynamic segment: %w", err)
@@ -387,10 +392,356 @@ func validateLoadableSharedLibrary(core *elf.File) error {
 			return errors.New("ELF dynamic flags identify a static PIE executable")
 		}
 		if tag == elf.DT_NULL {
-			return nil
+			terminated = true
+			break
+		}
+		switch tag {
+		case elf.DT_HASH, elf.DT_GNU_HASH, elf.DT_STRTAB, elf.DT_STRSZ, elf.DT_SYMTAB, elf.DT_SYMENT:
+			if _, duplicate := dynamicValues[tag]; duplicate {
+				return fmt.Errorf("ELF dynamic segment contains duplicate %s entries", tag)
+			}
+			dynamicValues[tag] = value
 		}
 	}
-	return errors.New("ELF dynamic segment has no DT_NULL terminator")
+	if !terminated {
+		return errors.New("ELF dynamic segment has no DT_NULL terminator")
+	}
+	return validateDynamicLoaderMetadata(core, loadSegments, dynamicValues, fileSize)
+}
+
+func validateDynamicLoaderMetadata(core *elf.File, loadSegments []*elf.Prog, values map[elf.DynTag]uint64, fileSize uint64) error {
+	for _, tag := range []elf.DynTag{elf.DT_STRTAB, elf.DT_STRSZ, elf.DT_SYMTAB, elf.DT_SYMENT} {
+		if _, found := values[tag]; !found {
+			return fmt.Errorf("ELF dynamic loader metadata is missing %s", tag)
+		}
+	}
+	if _, hasSystemVHash := values[elf.DT_HASH]; !hasSystemVHash {
+		if _, hasGNUHash := values[elf.DT_GNU_HASH]; !hasGNUHash {
+			return errors.New("ELF dynamic loader metadata has no DT_HASH or DT_GNU_HASH table")
+		}
+	}
+	if values[elf.DT_STRSZ] == 0 {
+		return errors.New("ELF dynamic string table is empty")
+	}
+	if values[elf.DT_SYMENT] != elf64DynamicSymbolSize {
+		return fmt.Errorf("ELF dynamic symbol entry size is %d, want %d", values[elf.DT_SYMENT], elf64DynamicSymbolSize)
+	}
+	if !fileBackedLoadContains(loadSegments, values[elf.DT_STRTAB], values[elf.DT_STRSZ], fileSize) {
+		return errors.New("ELF dynamic string table is outside file-backed load segments")
+	}
+	if !fileBackedLoadContains(loadSegments, values[elf.DT_SYMTAB], values[elf.DT_SYMENT], fileSize) {
+		return errors.New("ELF dynamic symbol table is outside file-backed load segments")
+	}
+	stringPrefix, err := readFileBackedLoad(loadSegments, values[elf.DT_STRTAB], 1, fileSize)
+	if err != nil || stringPrefix[0] != 0 {
+		return errors.New("ELF dynamic string table has no initial null byte")
+	}
+	nullSymbol, err := readFileBackedLoad(loadSegments, values[elf.DT_SYMTAB], elf64DynamicSymbolSize, fileSize)
+	if err != nil || !bytes.Equal(nullSymbol, make([]byte, elf64DynamicSymbolSize)) {
+		return errors.New("ELF dynamic symbol table has no initial null symbol")
+	}
+	if address, found := values[elf.DT_HASH]; found {
+		if err := validateSystemVHashTable(core, loadSegments, address, values[elf.DT_SYMTAB], fileSize); err != nil {
+			return err
+		}
+	}
+	if address, found := values[elf.DT_GNU_HASH]; found {
+		if err := validateGNUHashTable(core, loadSegments, address, values[elf.DT_SYMTAB], values[elf.DT_STRTAB], fileSize); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSystemVHashTable(core *elf.File, loadSegments []*elf.Prog, address, symbolAddress, fileSize uint64) error {
+	header, err := readFileBackedLoad(loadSegments, address, 8, fileSize)
+	if err != nil {
+		return errors.New("ELF System V hash table header is outside file-backed load segments")
+	}
+	bucketCount := uint64(core.ByteOrder.Uint32(header[:4]))
+	chainCount := uint64(core.ByteOrder.Uint32(header[4:]))
+	if bucketCount == 0 || chainCount == 0 || bucketCount > (math.MaxUint64-8)/4-chainCount {
+		return errors.New("ELF System V hash table has invalid dimensions")
+	}
+	tableSize := 8 + 4*(bucketCount+chainCount)
+	if !fileBackedLoadContains(loadSegments, address, tableSize, fileSize) {
+		return errors.New("ELF System V hash table is outside file-backed load segments")
+	}
+	symbolTableSize := chainCount * elf64DynamicSymbolSize
+	if !fileBackedLoadContains(loadSegments, symbolAddress, symbolTableSize, fileSize) {
+		return errors.New("ELF dynamic symbol table is shorter than the System V hash chain count")
+	}
+	tableAddress, overflow := addUint64(address, 8)
+	if overflow {
+		return errors.New("ELF System V hash table has invalid dimensions")
+	}
+	table, err := openFileBackedLoadRange(loadSegments, tableAddress, tableSize-8, fileSize)
+	if err != nil {
+		return errors.New("ELF System V hash table is outside file-backed load segments")
+	}
+	if bucketCount > uint64(math.MaxInt) || chainCount > uint64(math.MaxInt) {
+		return errors.New("ELF System V hash table has too many entries")
+	}
+	buckets := make([]uint32, int(bucketCount))
+	chains := make([]uint32, int(chainCount))
+	word := make([]byte, 4)
+	for index := range buckets {
+		if _, err := io.ReadFull(table, word); err != nil {
+			return fmt.Errorf("read ELF System V hash table: %w", err)
+		}
+		buckets[index] = core.ByteOrder.Uint32(word)
+		if uint64(buckets[index]) >= chainCount {
+			return errors.New("ELF System V hash table contains an out-of-range symbol index")
+		}
+	}
+	for index := range chains {
+		if _, err := io.ReadFull(table, word); err != nil {
+			return fmt.Errorf("read ELF System V hash table: %w", err)
+		}
+		chains[index] = core.ByteOrder.Uint32(word)
+		if uint64(chains[index]) >= chainCount {
+			return errors.New("ELF System V hash table contains an out-of-range symbol index")
+		}
+	}
+	return validateSystemVHashChains(buckets, chains)
+}
+
+func validateSystemVHashChains(buckets, chains []uint32) error {
+	states := make([]uint8, len(chains))
+	for _, bucket := range buckets {
+		path := make([]uint32, 0)
+		for current := bucket; current != 0 && states[current] == 0; current = chains[current] {
+			states[current] = 1
+			path = append(path, current)
+		}
+		if len(path) > 0 {
+			last := path[len(path)-1]
+			next := chains[last]
+			if next != 0 && states[next] == 1 {
+				return errors.New("ELF System V hash chain contains a cycle")
+			}
+		}
+		for _, symbol := range path {
+			states[symbol] = 2
+		}
+	}
+	return nil
+}
+
+func validateGNUHashTable(core *elf.File, loadSegments []*elf.Prog, address, symbolAddress, stringAddress, fileSize uint64) error {
+	header, err := readFileBackedLoad(loadSegments, address, 16, fileSize)
+	if err != nil {
+		return errors.New("ELF GNU hash table header is outside file-backed load segments")
+	}
+	bucketCount := uint64(core.ByteOrder.Uint32(header[:4]))
+	symbolOffset := uint64(core.ByteOrder.Uint32(header[4:8]))
+	bloomSize := uint64(core.ByteOrder.Uint32(header[8:12]))
+	bloomShift := core.ByteOrder.Uint32(header[12:])
+	if bucketCount == 0 || symbolOffset == 0 || bloomSize == 0 || bloomSize&(bloomSize-1) != 0 ||
+		bloomShift >= 32 || bloomSize > (math.MaxUint64-16)/8 {
+		return errors.New("ELF GNU hash table has invalid dimensions")
+	}
+	fixedSize := uint64(16) + 8*bloomSize
+	if bucketCount > (math.MaxUint64-fixedSize)/4 {
+		return errors.New("ELF GNU hash table has invalid dimensions")
+	}
+	fixedSize += 4 * bucketCount
+	if !fileBackedLoadContains(loadSegments, address, fixedSize, fileSize) {
+		return errors.New("ELF GNU hash table is outside file-backed load segments")
+	}
+	chainAddress, overflow := addUint64(address, fixedSize)
+	if overflow {
+		return errors.New("ELF GNU hash table has invalid dimensions")
+	}
+	chainBytes := fileBackedLoadAvailable(loadSegments, chainAddress, fileSize)
+	for _, boundary := range []uint64{symbolAddress, stringAddress} {
+		if boundary > chainAddress && boundary-chainAddress < chainBytes {
+			chainBytes = boundary - chainAddress
+		}
+	}
+	chainCount := chainBytes / 4
+	var chainLoad *elf.Prog
+	var chainLoadOffset uint64
+	if chainBytes > 0 {
+		var found bool
+		chainLoad, chainLoadOffset, found = locateFileBackedLoad(loadSegments, chainAddress, chainBytes, fileSize)
+		if !found || chainLoadOffset > math.MaxInt64 {
+			return errors.New("ELF GNU hash chain is outside file-backed load segments")
+		}
+	}
+	bucketsOffset := uint64(16) + 8*bloomSize
+	bucketsAddress, overflow := addUint64(address, bucketsOffset)
+	if overflow {
+		return errors.New("ELF GNU hash table has invalid dimensions")
+	}
+	buckets, err := openFileBackedLoadRange(loadSegments, bucketsAddress, 4*bucketCount, fileSize)
+	if err != nil {
+		return errors.New("ELF GNU hash bucket table is outside file-backed load segments")
+	}
+	if bucketCount > uint64(math.MaxInt) {
+		return errors.New("ELF GNU hash table has too many buckets")
+	}
+	word := make([]byte, 4)
+	bucketValues := make([]uint32, int(bucketCount))
+	for bucketIndex := uint64(0); bucketIndex < bucketCount; bucketIndex++ {
+		if _, err := io.ReadFull(buckets, word); err != nil {
+			return fmt.Errorf("read ELF GNU hash bucket table: %w", err)
+		}
+		bucketValues[bucketIndex] = core.ByteOrder.Uint32(word)
+	}
+	maxSymbol, err := validateGNUHashChains(bucketValues, symbolOffset, chainCount, func(chainIndex uint64) (uint32, error) {
+		chainOffset := 4 * chainIndex
+		entryOffset, overflow := addUint64(chainLoadOffset, chainOffset)
+		if overflow || entryOffset > math.MaxInt64 {
+			return 0, errors.New("ELF GNU hash bucket has no file-backed chain")
+		}
+		var entry [4]byte
+		read, err := chainLoad.ReadAt(entry[:], int64(entryOffset))
+		if err != nil || read != len(entry) {
+			return 0, errors.New("ELF GNU hash bucket has no file-backed chain")
+		}
+		return core.ByteOrder.Uint32(entry[:]), nil
+	})
+	if err != nil {
+		return err
+	}
+	symbolCount := maxSymbol + 1
+	if symbolCount > math.MaxUint64/elf64DynamicSymbolSize ||
+		!fileBackedLoadContains(loadSegments, symbolAddress, symbolCount*elf64DynamicSymbolSize, fileSize) {
+		return errors.New("ELF dynamic symbol table is shorter than the GNU hash symbol range")
+	}
+	return nil
+}
+
+func validateGNUHashChains(buckets []uint32, symbolOffset, chainCount uint64, readChain func(uint64) (uint32, error)) (uint64, error) {
+	maxSymbol := symbolOffset - 1
+	chainEnds := make(map[uint64]uint64)
+	for _, bucketValue := range buckets {
+		bucket := uint64(bucketValue)
+		if bucket == 0 {
+			continue
+		}
+		if bucket < symbolOffset {
+			return 0, errors.New("ELF GNU hash bucket precedes the dynamic symbol offset")
+		}
+		chainIndex := bucket - symbolOffset
+		if chainIndex >= chainCount {
+			return 0, errors.New("ELF GNU hash bucket has no file-backed chain")
+		}
+		chainEnd, found := chainEnds[chainIndex]
+		if !found {
+			visited := make([]uint64, 0)
+			for current := chainIndex; current < chainCount; current++ {
+				if cachedEnd, cached := chainEnds[current]; cached {
+					chainEnd = cachedEnd
+					found = true
+					break
+				}
+				value, err := readChain(current)
+				if err != nil {
+					return 0, err
+				}
+				visited = append(visited, current)
+				if value&1 != 0 {
+					chainEnd = current
+					found = true
+					break
+				}
+			}
+			if !found {
+				return 0, errors.New("ELF GNU hash chain has no terminator")
+			}
+			for _, visitedIndex := range visited {
+				chainEnds[visitedIndex] = chainEnd
+			}
+		}
+		symbolIndex, overflow := addUint64(symbolOffset, chainEnd)
+		if overflow {
+			return 0, errors.New("ELF GNU hash symbol range overflows")
+		}
+		if symbolIndex > maxSymbol {
+			maxSymbol = symbolIndex
+		}
+	}
+	return maxSymbol, nil
+}
+
+func fileBackedLoadContains(loadSegments []*elf.Prog, address, size, fileSize uint64) bool {
+	_, _, found := locateFileBackedLoad(loadSegments, address, size, fileSize)
+	return found
+}
+
+func locateFileBackedLoad(loadSegments []*elf.Prog, address, size, fileSize uint64) (*elf.Prog, uint64, bool) {
+	if size == 0 || size > math.MaxUint64-address {
+		return nil, 0, false
+	}
+	for _, load := range loadSegments {
+		if address < load.Vaddr {
+			continue
+		}
+		offset := address - load.Vaddr
+		if offset > load.Filesz || size > load.Filesz-offset || load.Off > fileSize || offset > fileSize-load.Off {
+			continue
+		}
+		fileOffset := load.Off + offset
+		if size <= fileSize-fileOffset {
+			return load, offset, true
+		}
+	}
+	return nil, 0, false
+}
+
+func openFileBackedLoadRange(loadSegments []*elf.Prog, address, size, fileSize uint64) (io.Reader, error) {
+	load, offset, found := locateFileBackedLoad(loadSegments, address, size, fileSize)
+	if !found || size > math.MaxInt64 || offset > math.MaxInt64 {
+		return nil, errors.New("ELF range is outside file-backed load segments")
+	}
+	reader := load.Open()
+	if _, err := reader.Seek(int64(offset), io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.LimitReader(reader, int64(size)), nil
+}
+
+func readFileBackedLoad(loadSegments []*elf.Prog, address, size, fileSize uint64) ([]byte, error) {
+	if size == 0 || size > uint64(math.MaxInt) {
+		return nil, errors.New("invalid ELF load range")
+	}
+	reader, err := openFileBackedLoadRange(loadSegments, address, size, fileSize)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, int(size))
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func fileBackedLoadAvailable(loadSegments []*elf.Prog, address, fileSize uint64) uint64 {
+	for _, load := range loadSegments {
+		if address < load.Vaddr {
+			continue
+		}
+		offset := address - load.Vaddr
+		if offset > load.Filesz || load.Off > fileSize || offset > fileSize-load.Off {
+			continue
+		}
+		available := load.Filesz - offset
+		physical := fileSize - (load.Off + offset)
+		if physical < available {
+			available = physical
+		}
+		return available
+	}
+	return 0
+}
+
+func addUint64(left, right uint64) (uint64, bool) {
+	if right > math.MaxUint64-left {
+		return 0, true
+	}
+	return left + right, false
 }
 
 type dockerOption struct {
@@ -479,6 +830,10 @@ func validateDockerOptions(args []string) error {
 			}
 			if enabled {
 				return errors.New("docker option --privileged conflicts with single-GPU device isolation")
+			}
+		case "--platform":
+			if option.value != requiredDockerPlatform {
+				return fmt.Errorf("docker platform %q conflicts with HAMi Core architecture %s", option.value, requiredDockerPlatform)
 			}
 		case "--detach":
 			enabled, err := booleanOptionEnabled(option)

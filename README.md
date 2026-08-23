@@ -68,7 +68,7 @@ hami-cli --context TARGET_CONTEXT --request-timeout 20s device assign \
 - 操作系统和 CPU 架构为 Linux/AMD64；
 - 已安装 NVIDIA 驱动、`nvidia-smi`、rootful Docker 和 NVIDIA Container Toolkit，当前 Docker endpoint 使用本机 `unix://` socket；
 - 已准备 Linux/AMD64 的 `libvgpu.so`，并从可信发布清单或交付渠道取得制品版本和 SHA-256 摘要；
-- 目标镜像使用 glibc；Core 文件权限允许当前 CLI 用户读取；
+- 目标镜像为 Linux/AMD64 并使用 glibc；Core 文件权限允许当前 CLI 用户读取；
 - `TMPDIR` 位于允许执行映射的本地文件系统；如果文件系统使用 `noexec` 挂载选项，CLI 会在启动 Docker 前停止；
 - 仅选择一个物理 GPU 索引或 `GPU-...` UUID，不使用 MIG。
 
@@ -105,7 +105,7 @@ hami-cli run \
 
 `CORE_SHA256` 不能从待验证文件现场计算后直接作为期望值。应从可信发布清单或交付渠道取得摘要，再由 CLI 对本地文件进行校验。
 
-`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构和可加载共享库结构。dry-run 本身不会创建文件快照或修改 SELinux label。输出命令引用调用时校验的原始 Core 路径，并包含 `:ro,z`。执行该输出时，Docker 会对原始 Core 应用可供多个容器共享的 SELinux relabel，避免并发执行引用同一 Core 的 dry-run 命令时互相替换私有 MCS label；该命令不具备真实执行路径的字节快照固定保证：
+`--dry-run` 只生成经过 POSIX shell quoting 的最终命令，不检查 Docker endpoint 或本机 GPU。CLI 仍会校验 Core 文件的 SHA-256、ELF 架构、动态加载元数据和可加载共享库结构。dry-run 本身不会创建文件快照或修改 SELinux label。输出命令引用调用时校验的原始 Core 路径，并包含 `:ro,z`。执行该输出时，Docker 会对原始 Core 应用可供多个容器共享的 SELinux relabel，避免并发执行引用同一 Core 的 dry-run 命令时互相替换私有 MCS label；该命令不具备真实执行路径的字节快照固定保证：
 
 ```bash
 hami-cli run \
@@ -124,9 +124,10 @@ hami-cli run \
 
 当前 PoC 只接受前台、一次性的 `--rm` 容器，并拒绝 `--detach` 和非 `no` 的 restart policy。清理辅助进程在前台 Docker 客户端退出后删除快照目录；`--rm` 保证容器不会在快照删除后被再次启动。
 
-CLI 在 `docker run` 后插入 `--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。CLI 显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`。当前单 GPU 合同把容器内设备索引固定为 `0`；CLI 同时设置全局显存、算力限制和同值的 `CUDA_DEVICE_MEMORY_LIMIT_0`、`CUDA_DEVICE_SM_LIMIT_0`，避免镜像中的 per-device `ENV` 优先覆盖全局值。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
+CLI 在 `docker run` 后插入 `--platform linux/amd64`、`--gpus`、`no-new-privileges=true`、Core 只读挂载、私有 tmpfs 状态目录、HAMi Core 环境变量、最低 NVIDIA driver capabilities 和可审计标签。固定平台参数让 Docker 从多架构镜像中解析 Linux/AMD64 变体；调用方显式指定其他平台时，CLI 会在启动 Docker 前拒绝。CLI 显式设置 `CUDA_DISABLE_CONTROL=false` 和 `GPU_CORE_UTILIZATION_POLICY=default`，覆盖镜像中可能关闭显存或算力限制的同名 `ENV`。当前单 GPU 合同把容器内设备索引固定为 `0`；CLI 同时设置全局显存、算力限制和同值的 `CUDA_DEVICE_MEMORY_LIMIT_0`、`CUDA_DEVICE_SM_LIMIT_0`，避免镜像中的 per-device `ENV` 优先覆盖全局值。`no-new-privileges` 会阻止 setuid、setgid 和文件 capability 在后续 `execve` 中授予新权限，避免 glibc 因这类权限提升忽略 `LD_PRELOAD`。原 Docker argv 的值和相对顺序保持不变。用户已设置以下内容时，CLI 会拒绝执行，避免静默覆盖：
 
 - `--gpus`、非 `nvidia` 的 `--runtime` 或启用状态的 `--privileged`；
+- 非 `linux/amd64` 的 `--platform`；
 - 显式关闭 `no-new-privileges` 的 `--security-opt`；
 - `--detach`、缺少 `--rm` 或非 `no` 的 restart policy；
 - 所有调用方提供的 `--device`，或可能授权 NVIDIA 字符设备的 `--device-cgroup-rule`；

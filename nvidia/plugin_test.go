@@ -93,17 +93,27 @@ func testArtifact(t *testing.T) hamirun.Artifact {
 
 func testELFSharedObject(t *testing.T) []byte {
 	t.Helper()
-	return testELFImage(t, false, 0)
+	return testELFImage(t, false, 0, true, elf.DT_HASH)
+}
+
+func testELFGNUSharedObject(t *testing.T) []byte {
+	t.Helper()
+	return testELFImage(t, false, 0, true, elf.DT_GNU_HASH)
 }
 
 func testELFPIE(t *testing.T) []byte {
 	t.Helper()
-	return testELFImage(t, true, 0)
+	return testELFImage(t, true, 0, true, elf.DT_HASH)
 }
 
 func testELFStaticPIE(t *testing.T) []byte {
 	t.Helper()
-	return testELFImage(t, false, uint64(elf.DF_1_PIE))
+	return testELFImage(t, false, uint64(elf.DF_1_PIE), true, elf.DT_HASH)
+}
+
+func testELFTerminatorOnly(t *testing.T) []byte {
+	t.Helper()
+	return testELFImage(t, false, 0, false, elf.DT_NULL)
 }
 
 func testELFHeaderOnly(t *testing.T) []byte {
@@ -119,7 +129,7 @@ func testELFHeaderOnly(t *testing.T) []byte {
 	return bytes.Clone(header)
 }
 
-func testELFImage(t *testing.T, interpreter bool, flagsOne uint64) []byte {
+func testELFImage(t *testing.T, interpreter bool, flagsOne uint64, loaderMetadata bool, hashTag elf.DynTag) []byte {
 	t.Helper()
 	const (
 		headerSize        = 64
@@ -134,9 +144,25 @@ func testELFImage(t *testing.T, interpreter bool, flagsOne uint64) []byte {
 	if flagsOne != 0 {
 		dynamicEntryCount++
 	}
+	if loaderMetadata {
+		dynamicEntryCount += 5
+	}
 	dynamicOffset := headerSize + programCount*programHeaderSize
 	dynamicSize := dynamicEntryCount * dynamicEntrySize
-	content := make([]byte, dynamicOffset+dynamicSize)
+	hashSize := 16
+	symbolTableSize := elf64DynamicSymbolSize
+	if hashTag == elf.DT_GNU_HASH {
+		hashSize = 32
+		symbolTableSize *= 2
+	}
+	hashOffset := dynamicOffset + dynamicSize
+	symbolOffset := hashOffset + hashSize
+	stringOffset := symbolOffset + symbolTableSize
+	contentSize := dynamicOffset + dynamicSize
+	if loaderMetadata {
+		contentSize = stringOffset + 1
+	}
+	content := make([]byte, contentSize)
 	copy(content, []byte{0x7f, 'E', 'L', 'F', byte(elfClass64), byte(elfDataLittleEndian), 1, 0})
 	binary.LittleEndian.PutUint16(content[16:], 3)  // ET_DYN
 	binary.LittleEndian.PutUint16(content[18:], 62) // EM_X86_64
@@ -163,11 +189,63 @@ func testELFImage(t *testing.T, interpreter bool, flagsOne uint64) []byte {
 	if interpreter {
 		writeProgramHeader(2, 3, 4, uint64(dynamicOffset), 1, 1) // PT_INTERP, PF_R
 	}
+	dynamicIndex := 0
+	writeDynamic := func(tag elf.DynTag, value uint64) {
+		base := dynamicOffset + dynamicIndex*dynamicEntrySize
+		binary.LittleEndian.PutUint64(content[base:], uint64(tag))
+		binary.LittleEndian.PutUint64(content[base+8:], value)
+		dynamicIndex++
+	}
 	if flagsOne != 0 {
-		binary.LittleEndian.PutUint64(content[dynamicOffset:], uint64(elf.DT_FLAGS_1))
-		binary.LittleEndian.PutUint64(content[dynamicOffset+8:], flagsOne)
+		writeDynamic(elf.DT_FLAGS_1, flagsOne)
+	}
+	if loaderMetadata {
+		writeDynamic(hashTag, uint64(hashOffset))
+		writeDynamic(elf.DT_STRTAB, uint64(stringOffset))
+		writeDynamic(elf.DT_SYMTAB, uint64(symbolOffset))
+		writeDynamic(elf.DT_STRSZ, 1)
+		writeDynamic(elf.DT_SYMENT, elf64DynamicSymbolSize)
+		switch hashTag {
+		case elf.DT_HASH:
+			binary.LittleEndian.PutUint32(content[hashOffset:], 1)
+			binary.LittleEndian.PutUint32(content[hashOffset+4:], 1)
+		case elf.DT_GNU_HASH:
+			binary.LittleEndian.PutUint32(content[hashOffset:], 1)
+			binary.LittleEndian.PutUint32(content[hashOffset+4:], 1)
+			binary.LittleEndian.PutUint32(content[hashOffset+8:], 1)
+			binary.LittleEndian.PutUint32(content[hashOffset+12:], 5)
+			binary.LittleEndian.PutUint32(content[hashOffset+24:], 1)
+			binary.LittleEndian.PutUint32(content[hashOffset+28:], 1)
+		default:
+			t.Fatalf("unsupported test hash tag %s", hashTag)
+		}
 	}
 	return content
+}
+
+func testDynamicEntry(t *testing.T, content []byte, want elf.DynTag) (int, uint64) {
+	t.Helper()
+	parsed, err := elf.NewFile(bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parsed.Close() }()
+	for _, program := range parsed.Progs {
+		if program.Type != elf.PT_DYNAMIC {
+			continue
+		}
+		for offset := int(program.Off); offset+16 <= int(program.Off+program.Filesz); offset += 16 {
+			tag := elf.DynTag(int64(parsed.ByteOrder.Uint64(content[offset:])))
+			if tag == want {
+				return offset, parsed.ByteOrder.Uint64(content[offset+8:])
+			}
+			if tag == elf.DT_NULL {
+				break
+			}
+		}
+	}
+	t.Fatalf("dynamic tag %s not found", want)
+	return 0, 0
 }
 
 const (
@@ -213,6 +291,7 @@ func TestInjectBuildsNVIDIAContract(t *testing.T) {
 	}
 	joined := strings.Join(injection.Args, "\n")
 	for _, want := range []string{
+		"--platform\nlinux/amd64",
 		"--gpus\ndevice=0",
 		"--security-opt\nno-new-privileges=true",
 		"--volume\n" + request.Core.Path + ":/usr/local/vgpu/libvgpu.so:ro,z",
@@ -248,6 +327,8 @@ func TestInjectRejectsDockerConflicts(t *testing.T) {
 		want string
 	}{
 		{name: "gpus", args: []string{"--gpus", "all", "image"}, want: "--gpus"},
+		{name: "ARM64 platform", args: []string{"--platform", "linux/arm64", "image"}, want: "linux/amd64"},
+		{name: "386 platform", args: []string{"--platform=linux/386", "image"}, want: "linux/amd64"},
 		{name: "runtime", args: []string{"--runtime=runc", "image"}, want: "runtime"},
 		{name: "privileged", args: []string{"--privileged", "image"}, want: "--privileged"},
 		{name: "disable no new privileges", args: []string{"--security-opt", "no-new-privileges=false", "image"}, want: "no-new-privileges=true"},
@@ -349,6 +430,7 @@ func TestInjectPreservesNonConflictingOptionsAndContainerArgs(t *testing.T) {
 	t.Parallel()
 	request := testRequest(t, []string{
 		"docker", "run", "--runtime=nvidia", "--privileged=false", "--disable-content-trust", "-i=false",
+		"--platform", "linux/amd64",
 		"--future-flag=value", "--security-opt", "no-new-privileges=true", "--env", "SAFE=value",
 		"--device-cgroup-rule", "c 1:3 rw",
 		"--net", "host",
@@ -426,6 +508,169 @@ func TestInjectRejectsHeaderOnlyELFCore(t *testing.T) {
 	_, err := New().Inject(t.Context(), request)
 	if err == nil || !strings.Contains(err.Error(), "loadable shared library") {
 		t.Fatalf("Inject() error = %v, want loadable shared library rejection", err)
+	}
+}
+
+func TestInjectRejectsTerminatorOnlyDynamicSection(t *testing.T) {
+	t.Parallel()
+	request := testRequest(t, []string{"docker", "run", "image"})
+	content := testELFTerminatorOnly(t)
+	request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "dynamic loader metadata") {
+		t.Fatalf("Inject() error = %v, want dynamic loader metadata rejection", err)
+	}
+}
+
+func TestInjectRejectsOutOfRangeDynamicHashTable(t *testing.T) {
+	t.Parallel()
+	request := testRequest(t, []string{"docker", "run", "image"})
+	content := testELFSharedObject(t)
+	parsed, err := elf.NewFile(bytes.NewReader(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parsed.Close() }()
+	dynamicOffset := parsed.Progs[1].Off
+	binary.LittleEndian.PutUint64(content[dynamicOffset+8:], uint64(len(content)+4096))
+	request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err = New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "hash table header") {
+		t.Fatalf("Inject() error = %v, want out-of-range hash table rejection", err)
+	}
+}
+
+func TestInjectAcceptsGNUHashOnlyCore(t *testing.T) {
+	t.Parallel()
+	content := testELFGNUSharedObject(t)
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	if _, err := New().Inject(t.Context(), request); err != nil {
+		t.Fatalf("Inject() error = %v, want GNU-hash-only Core acceptance", err)
+	}
+}
+
+func TestInjectRejectsPhysicallyTruncatedLoaderMetadata(t *testing.T) {
+	t.Parallel()
+	content := testELFSharedObject(t)
+	content = content[:len(content)-1]
+	request := testRequest(t, []string{"docker", "run", "image"})
+	request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+	if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	request.Core.SHA256 = fmt.Sprintf("%x", digest)
+	_, err := New().Inject(t.Context(), request)
+	if err == nil || !strings.Contains(err.Error(), "outside file-backed load segments") {
+		t.Fatalf("Inject() error = %v, want physical truncation rejection", err)
+	}
+}
+
+func TestInjectRejectsMalformedDynamicHashMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content func(*testing.T) []byte
+		mutate  func(*testing.T, []byte)
+		want    string
+	}{
+		{
+			name:    "System V out-of-range bucket",
+			content: testELFSharedObject,
+			mutate: func(t *testing.T, content []byte) {
+				_, hashAddress := testDynamicEntry(t, content, elf.DT_HASH)
+				binary.LittleEndian.PutUint32(content[int(hashAddress)+8:], 1)
+			},
+			want: "out-of-range symbol index",
+		},
+		{
+			name:    "GNU missing chain",
+			content: testELFGNUSharedObject,
+			mutate: func(t *testing.T, content []byte) {
+				_, hashAddress := testDynamicEntry(t, content, elf.DT_GNU_HASH)
+				symbolEntry, _ := testDynamicEntry(t, content, elf.DT_SYMTAB)
+				binary.LittleEndian.PutUint64(content[symbolEntry+8:], hashAddress+29)
+				binary.LittleEndian.PutUint32(content[int(hashAddress)+28:], 0)
+			},
+			want: "no file-backed chain",
+		},
+		{
+			name:    "GNU nonterminating chain",
+			content: testELFGNUSharedObject,
+			mutate: func(t *testing.T, content []byte) {
+				_, hashAddress := testDynamicEntry(t, content, elf.DT_GNU_HASH)
+				binary.LittleEndian.PutUint32(content[int(hashAddress)+28:], 0)
+			},
+			want: "chain has no terminator",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			content := test.content(t)
+			test.mutate(t, content)
+			request := testRequest(t, []string{"docker", "run", "image"})
+			request.Core.Path = filepath.Join(t.TempDir(), "libvgpu.so")
+			if err := os.WriteFile(request.Core.Path, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(content)
+			request.Core.SHA256 = fmt.Sprintf("%x", digest)
+			_, err := New().Inject(t.Context(), request)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Inject() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateGNUHashChainsReadsSharedSuffixOnce(t *testing.T) {
+	t.Parallel()
+	const chainCount = uint64(65536)
+	buckets := make([]uint32, chainCount)
+	for index := range buckets {
+		buckets[index] = 1
+	}
+	reads := uint64(0)
+	maxSymbol, err := validateGNUHashChains(buckets, 1, chainCount, func(index uint64) (uint32, error) {
+		reads++
+		if index == chainCount-1 {
+			return 1, nil
+		}
+		return 0, nil
+	})
+	if err != nil {
+		t.Fatalf("validateGNUHashChains() error = %v", err)
+	}
+	if maxSymbol != chainCount {
+		t.Fatalf("max symbol = %d, want %d", maxSymbol, chainCount)
+	}
+	if reads != chainCount {
+		t.Fatalf("chain reads = %d, want linear bound %d", reads, chainCount)
+	}
+}
+
+func TestValidateSystemVHashChainsRejectsCycle(t *testing.T) {
+	t.Parallel()
+	err := validateSystemVHashChains([]uint32{1}, []uint32{0, 1})
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("validateSystemVHashChains() error = %v, want cycle rejection", err)
 	}
 }
 
