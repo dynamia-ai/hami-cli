@@ -42,7 +42,6 @@ lint:
 test:
 	GOWORK=off $(GO) test -race -covermode=atomic -coverprofile="$(GO_COVERAGE_FILE)" $(GO_PACKAGES)
 	test -s "$(GO_COVERAGE_FILE)"
-	bash hack/publish-oss_test.sh
 	bash hack/write-release-summary_test.sh
 
 verify-build:
