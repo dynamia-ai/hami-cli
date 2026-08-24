@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage HAMi Resource Pools"
+  short_description: "Safely operate HAMi resource pools with hami-cli"
+  default_prompt: "Use $managing-hami-resource-pools to inspect or change resource pools on a selected Kubernetes context."
