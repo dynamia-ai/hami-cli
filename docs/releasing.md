@@ -6,7 +6,7 @@
 
 | 通道 | 触发方式 | 版本目录和镜像标签 | 可变性 |
 | --- | --- | --- | --- |
-| 稳定版 | 推送 `vX.Y.Z` 标签 | `vX.Y.Z` | OSS、S3 和 GitHub Release 资产不可覆盖；GHCR 标签本身可变 |
+| 稳定版 | 推送 `vX.Y.Z` 标签 | `vX.Y.Z` | OSS 允许覆盖；S3 和 GitHub Release 资产不可覆盖；GHCR 标签仅允许相同内容重跑 |
 | latest | `main` 更新 | `latest` | 后续发布会覆盖 |
 | 分支版 | 从 `main` 手动运行 Rolling Release | `branch-<slug>` | 同名分支版本会覆盖 |
 
@@ -42,18 +42,18 @@ GoReleaser 生成五个平台归档和 `checksums.txt`：
 - 每个公开文件的 OSS 和 S3 下载链接；
 - GHCR 标签引用、不可变 digest 引用和 digest。
 
-## 不可变发布合同
+## 稳定版发布合同
 
-稳定版发布遵循以下规则：
+稳定版在各发布后端使用不同的覆盖策略：
 
-- OSS 使用服务端禁止覆盖参数写入对象。
+- OSS 允许覆盖同一版本路径下的同名对象。OSS 对象使用 `no-cache` 缓存策略，客户端需要重新验证对象内容。
+- OSS Bucket 开启版本控制时，OSS 保留历史版本；不带 `versionId` 的公开下载链接指向当前版本。
 - S3 使用 `If-None-Match: *` 条件请求写入对象。
 - GitHub Release 不覆盖内容不同的同名资产。
-- 同一提交生成的相同内容可以在失败后继续发布。
-- 已存在对象、Release 资产或 GHCR 标签与本次内容、digest、源码 revision 不一致时，工作流停止。
+- S3 对象、GitHub Release 资产或 GHCR 标签与本次内容、digest、源码 revision 不一致时，工作流停止。
 - GHCR 不提供服务端不可变标签。发布时验证标签对应的 digest 和镜像 revision；使用者需要不可变引用时，应使用 `image@sha256:...`。
 
-滚动版的 `latest` 和分支版本是可变通道，不适合作为不可变交付合同。
+滚动版的 `latest` 和分支版本在 OSS、S3 和 GHCR 中均允许更新。OSS 稳定版路径也允许更新；稳定版 S3、GitHub Release 和 GHCR 继续执行上述不可变校验。
 
 ## 公开可用性验证
 
@@ -78,7 +78,7 @@ GHCR 验证会检查清单 digest，以及 `linux/amd64`、`linux/arm64` 镜像�
 - `ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL`：包含 `/hami-cli` 的 OSS 公开下载前缀。
 - `S3_PUBLIC_DOWNLOAD_BASE_URL`：包含 `/hami-cli` 的 S3 兼容存储公开下载前缀。
 
-OSS 发布身份需要读取 Bucket 版本控制状态、读写对象和设置对象 ACL。稳定版发布要求 OSS Bucket 关闭版本控制；状态为 `Enabled` 或 `Suspended` 时，工作流停止。
+OSS 发布身份需要读写对象和设置对象 ACL。发布工作流不检查 Bucket 版本控制状态，稳定版和滚动版均允许覆盖同名 OSS 对象。
 
 使用 Cloudflare R2 时：
 
