@@ -20,7 +20,7 @@ gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
 
 ## 发布制品
 
-GoReleaser 生成五个平台归档和 `checksums.txt`：
+GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` 校验文件：
 
 - `linux/amd64`
 - `linux/arm64`

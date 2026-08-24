@@ -20,9 +20,12 @@ s3_base_url="${S3_PUBLIC_DOWNLOAD_BASE_URL%/}"
 [[ "$s3_base_url" =~ ^https://[^[:space:]]+$ ]]
 
 shopt -s nullglob
-artifacts=("$dist_dir"/*.tar.gz)
-test "${#artifacts[@]}" -gt 0
-artifacts+=("$dist_dir/checksums.txt")
+archives=("$dist_dir"/*.tar.gz)
+test "${#archives[@]}" -gt 0
+artifacts=()
+for archive in "${archives[@]}"; do
+  artifacts+=("$archive" "$archive.sha256")
+done
 if [[ -f "$dist_dir/image-digest.txt" ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi

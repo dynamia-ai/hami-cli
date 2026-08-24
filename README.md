@@ -27,9 +27,8 @@ BASE_URL=https://storage.dynamia.ai/hami-cli
 ARCHIVE="hami-cli_${VERSION}_${PLATFORM}.tar.gz"
 
 curl -fLO "$BASE_URL/$VERSION/$ARCHIVE"
-curl -fLO "$BASE_URL/$VERSION/checksums.txt"
-grep "  $ARCHIVE\$" checksums.txt > "$ARCHIVE.sha256"
-sha256sum -c "$ARCHIVE.sha256"
+curl -fLO "$BASE_URL/$VERSION/$ARCHIVE.sha256"
+test "$(sha256sum "$ARCHIVE" | cut -d ' ' -f1)" = "$(cat "$ARCHIVE.sha256")"
 tar -xzf "$ARCHIVE"
 sudo install -m 0755 "hami-cli_${VERSION}_${PLATFORM}/hami-cli" /usr/local/bin/hami-cli
 hami-cli version
@@ -38,10 +37,10 @@ hami-cli version
 macOS 可将校验命令替换为：
 
 ```bash
-shasum -a 256 -c "$ARCHIVE.sha256"
+test "$(shasum -a 256 "$ARCHIVE" | cut -d ' ' -f1)" = "$(cat "$ARCHIVE.sha256")"
 ```
 
-`checksums.txt` 用于检查下载内容是否完整。归档和校验文件来自同一个公开发布通道，因此该校验不能替代独立的制品签名或来源证明。
+每个归档都有同名的 `.sha256` 校验文件，用于检查下载内容是否完整。归档和校验文件来自同一个公开发布通道，因此该校验不能替代独立的制品签名或来源证明。
 
 `latest` 是可变版本，适合验证和持续集成，不提供不可变保证。稳定版发布后，将 `VERSION` 替换为完整标签，例如 `vX.Y.Z`。目录名和归档文件名都保留前导 `v`。
 

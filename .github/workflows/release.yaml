@@ -256,7 +256,7 @@ jobs:
           for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
             base_url="${configured_base_url%/}"
             [[ "$base_url" = https://* ]]
-            for file in dist/*.tar.gz dist/checksums.txt dist/image-digest.txt; do
+            for file in dist/*.tar.gz dist/*.tar.gz.sha256 dist/image-digest.txt; do
               curl --retry 8 --retry-all-errors -fsSLo "$RUNNER_TEMP/${file##*/}" \
                 "$base_url/$GITHUB_REF_NAME/${file##*/}"
               cmp "$file" "$RUNNER_TEMP/${file##*/}"

@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode="${1:?usage: publish-oss.sh stable|mutable VERSION DIST_DIR}"
 version="${2:?usage: publish-oss.sh stable|mutable VERSION DIST_DIR}"
 dist_dir="${3:?usage: publish-oss.sh stable|mutable VERSION DIST_DIR}"
@@ -29,26 +30,23 @@ export OSS_REGION="$ALIYUN_OSS_REGION"
 export OSS_ENDPOINT="$ALIYUN_OSS_ENDPOINT"
 
 shopt -s nullglob
-artifacts=("$dist_dir"/*.tar.gz "$dist_dir/checksums.txt")
+artifacts=("$dist_dir"/*.tar.gz "$dist_dir"/*.tar.gz.sha256)
 if [[ "$mode" = stable ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
-expected_count=6
-[[ "$mode" = stable ]] && expected_count=7
+expected_count=10
+[[ "$mode" = stable ]] && expected_count=11
 test "${#artifacts[@]}" -eq "$expected_count"
 for archive in "$dist_dir"/*.tar.gz; do
   [[ "${archive##*/}" = "hami-cli_${version}_"*.tar.gz ]]
 done
-(
-  cd "$dist_dir"
-  sha256sum --check checksums.txt
-)
+bash "$script_dir/verify-release-archives.sh" "$dist_dir"
 
 for artifact in "${artifacts[@]}"; do
   name="${artifact##*/}"
   key="hami-cli/$version/$name"
   content_type=application/gzip
-  [[ "$name" = *.txt ]] && content_type=text/plain
+  [[ "$name" = *.sha256 || "$name" = *.txt ]] && content_type=text/plain
 
   ossutil api put-object \
     --bucket "$ALIYUN_OSS_BUCKET" \

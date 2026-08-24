@@ -181,7 +181,7 @@ jobs:
           name: release-binaries-${{ steps.release.outputs.version }}
           path: |
             dist/*.tar.gz
-            dist/checksums.txt
+            dist/*.tar.gz.sha256
             dist/hami-cli-image.tar
           if-no-files-found: error
           retention-days: 1
@@ -226,10 +226,7 @@ jobs:
           digest="$(tar -xOf dist/hami-cli-image.tar index.json \
             | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           test "$digest" = "$EXPECTED_DIGEST"
-          (
-            cd dist
-            sha256sum --check checksums.txt
-          )
+          bash release-control/hack/verify-release-archives.sh dist
 
       - name: Validate publication credentials
         env:
@@ -351,7 +348,7 @@ jobs:
           for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
             base_url="${configured_base_url%/}"
             [[ "$base_url" = https://* ]]
-            for file in dist/*.tar.gz dist/checksums.txt; do
+            for file in dist/*.tar.gz dist/*.tar.gz.sha256; do
               verified=false
               for attempt in {1..8}; do
                 if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \
