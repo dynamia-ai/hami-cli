@@ -9,15 +9,10 @@ digest="${4:?usage: write-release-summary.sh VERSION DIST_DIR IMAGE DIGEST}"
 
 : "${ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL:?ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL is required}"
 : "${S3_PUBLIC_DOWNLOAD_BASE_URL:?S3_PUBLIC_DOWNLOAD_BASE_URL is required}"
-: "${ACTIONS_ARTIFACT_NAME:?ACTIONS_ARTIFACT_NAME is required}"
-: "${ACTIONS_ARTIFACT_RETENTION_DAYS:?ACTIONS_ARTIFACT_RETENTION_DAYS is required}"
-: "${ACTIONS_ARTIFACT_URL:?ACTIONS_ARTIFACT_URL is required}"
 : "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is required}"
 
 [[ "$version" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-[[ "$ACTIONS_ARTIFACT_RETENTION_DAYS" =~ ^[1-9][0-9]*$ ]]
-[[ "$ACTIONS_ARTIFACT_URL" =~ ^https://[^[:space:]]+$ ]]
 
 oss_base_url="${ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL%/}"
 s3_base_url="${S3_PUBLIC_DOWNLOAD_BASE_URL%/}"
@@ -54,8 +49,4 @@ done
   echo "- Reference: \`$image:$version\`"
   echo "- Immutable reference: \`$image@$digest\`"
   echo "- Digest: \`$digest\`"
-  echo
-  echo '### Actions artifact'
-  echo
-  echo "- [$ACTIONS_ARTIFACT_NAME]($ACTIONS_ARTIFACT_URL) requires GitHub sign-in and repository read access, and is retained for $ACTIONS_ARTIFACT_RETENTION_DAYS days."
 } >> "$GITHUB_STEP_SUMMARY"
