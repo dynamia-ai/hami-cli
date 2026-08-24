@@ -22,61 +22,62 @@ import (
 	"testing"
 )
 
-func TestResolveCLIBuildInfoUsesStandaloneModuleVersion(t *testing.T) {
+func TestResolveCLIBuildInfo(t *testing.T) {
 	t.Parallel()
-	buildInfo := &debug.BuildInfo{
-		Main: debug.Module{Version: "v0.0.0-20260817092328-9214a562258d"},
-	}
-
-	got := resolveCLIBuildInfo("devel", "unknown", "unknown", buildInfo)
-	if got.Version != "v0.0.0-20260817092328-9214a562258d" {
-		t.Errorf("Version = %q, want module version", got.Version)
-	}
-	if got.Revision != "9214a562258d" {
-		t.Errorf("Revision = %q", got.Revision)
-	}
-	if got.CommitDate != "2026-08-17T09:23:28Z" {
-		t.Errorf("CommitDate = %q", got.CommitDate)
-	}
-	if got.BuildDate != "unknown" {
-		t.Errorf("BuildDate = %q, want unknown", got.BuildDate)
-	}
-}
-
-func TestResolveCLIBuildInfoPrefersVCSSettings(t *testing.T) {
-	t.Parallel()
-	buildInfo := &debug.BuildInfo{
-		Main: debug.Module{Version: "v0.0.0-20260817092328-9214a562258d"},
-		Settings: []debug.BuildSetting{
-			{Key: "vcs.revision", Value: "9214a562258deb2850bd16a199950ef9c5568578"},
-			{Key: "vcs.time", Value: "2026-08-17T09:24:00Z"},
+	pseudoVersion := "v0.0.0-20260817092328-9214a562258d"
+	tests := []struct {
+		name      string
+		version   string
+		revision  string
+		buildDate string
+		settings  []debug.BuildSetting
+		want      cliBuildInfo
+	}{
+		{
+			name:      "pseudo-version metadata",
+			version:   "devel",
+			revision:  "unknown",
+			buildDate: "unknown",
+			want:      cliBuildInfo{Version: pseudoVersion, Revision: "9214a562258d", CommitDate: "2026-08-17T09:23:28Z", BuildDate: "unknown"},
+		},
+		{
+			name:      "VCS metadata",
+			version:   "devel",
+			revision:  "unknown",
+			buildDate: "unknown",
+			settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: "9214a562258deb2850bd16a199950ef9c5568578"},
+				{Key: "vcs.time", Value: "2026-08-17T09:24:00Z"},
+			},
+			want: cliBuildInfo{Version: pseudoVersion, Revision: "9214a562258deb2850bd16a199950ef9c5568578", CommitDate: "2026-08-17T09:24:00Z", BuildDate: "unknown"},
+		},
+		{
+			name:      "release metadata",
+			version:   "latest",
+			revision:  "abc123",
+			buildDate: "2026-08-17T10:00:00Z",
+			want:      cliBuildInfo{Version: "latest", Revision: "abc123", CommitDate: "2026-08-17T09:23:28Z", BuildDate: "2026-08-17T10:00:00Z"},
 		},
 	}
-
-	got := resolveCLIBuildInfo("devel", "unknown", "unknown", buildInfo)
-	if got.Revision != "9214a562258deb2850bd16a199950ef9c5568578" {
-		t.Errorf("Revision = %q", got.Revision)
-	}
-	if got.CommitDate != "2026-08-17T09:24:00Z" {
-		t.Errorf("CommitDate = %q", got.CommitDate)
-	}
-	if got.BuildDate != "unknown" {
-		t.Errorf("BuildDate = %q, want unknown", got.BuildDate)
-	}
-}
-
-func TestResolveCLIBuildInfoPreservesReleaseMetadata(t *testing.T) {
-	t.Parallel()
-	buildInfo := &debug.BuildInfo{Main: debug.Module{Version: "v0.0.0-20260817092328-9214a562258d"}}
-
-	got := resolveCLIBuildInfo("latest", "abc123", "2026-08-17T10:00:00Z", buildInfo)
-	if got.Version != "latest" || got.Revision != "abc123" || got.CommitDate != "2026-08-17T09:23:28Z" || got.BuildDate != "2026-08-17T10:00:00Z" {
-		t.Fatalf("resolveCLIBuildInfo() = %#v", got)
-	}
-	if output := got.String(); !strings.Contains(output, "version:          latest") ||
-		!strings.Contains(output, "commit date:      2026-08-17T09:23:28Z") ||
-		!strings.Contains(output, "build date:       2026-08-17T10:00:00Z") {
-		t.Errorf("String() = %q", output)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveCLIBuildInfo(test.version, test.revision, test.buildDate, &debug.BuildInfo{
+				Main:     debug.Module{Version: pseudoVersion},
+				Settings: test.settings,
+			})
+			if got.Version != test.want.Version || got.Revision != test.want.Revision || got.CommitDate != test.want.CommitDate || got.BuildDate != test.want.BuildDate {
+				t.Fatalf("resolveCLIBuildInfo() = %#v, want version metadata %#v", got, test.want)
+			}
+			if test.name == "release metadata" {
+				output := got.String()
+				if !strings.Contains(output, "version:          latest") ||
+					!strings.Contains(output, "commit date:      2026-08-17T09:23:28Z") ||
+					!strings.Contains(output, "build date:       2026-08-17T10:00:00Z") {
+					t.Fatalf("String() = %q", output)
+				}
+			}
+		})
 	}
 }
 

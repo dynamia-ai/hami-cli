@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -58,39 +59,6 @@ func TestRootCommandUsesKubectlPluginDisplayNameAndStandardFlags(t *testing.T) {
 		if command.PersistentFlags().Lookup(name) == nil {
 			t.Errorf("missing standard Kubernetes flag --%s", name)
 		}
-	}
-}
-
-func TestDeviceNameFromArgs(t *testing.T) {
-	t.Parallel()
-	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"}
-	tests := []struct {
-		name     string
-		args     []string
-		node     string
-		deviceID string
-		want     string
-		wantErr  string
-	}{
-		{name: "object name", args: []string{"device-object"}, want: "device-object"},
-		{name: "physical identity", node: "node-a", deviceID: "GPU-A", want: resourcepoolv1alpha1.DeviceObjectName(identity)},
-		{name: "missing identity", node: "node-a", wantErr: "both --node and --device-id"},
-		{name: "mixed forms", args: []string{"device-object"}, node: "node-a", deviceID: "GPU-A", wantErr: "cannot be combined"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := deviceNameFromArgs(test.args, test.node, test.deviceID)
-			if test.wantErr == "" && err != nil {
-				t.Fatalf("deviceNameFromArgs() error = %v", err)
-			}
-			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
-				t.Fatalf("deviceNameFromArgs() error = %v, want substring %q", err, test.wantErr)
-			}
-			if got != test.want {
-				t.Errorf("deviceNameFromArgs() = %q, want %q", got, test.want)
-			}
-		})
 	}
 }
 
@@ -300,135 +268,116 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	}
 }
 
-func TestDefaultApplyNamespace(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name              string
-		manifestNamespace string
-		contextNamespace  string
-		overrideNamespace string
-		wantNamespace     string
-		wantErr           string
-	}{
-		{
-			name:              "defaults missing namespace from explicit override",
-			overrideNamespace: "team-a",
-			wantNamespace:     "team-a",
-		},
-		{
-			name:             "defaults missing namespace from context",
-			contextNamespace: "team-a",
-			wantNamespace:    "team-a",
-		},
-		{
-			name:              "manifest namespace may differ from context default",
-			manifestNamespace: "team-b",
-			contextNamespace:  "team-a",
-			wantNamespace:     "team-b",
-		},
-		{
-			name:              "accepts matching explicit namespace",
-			manifestNamespace: "team-a",
-			overrideNamespace: "team-a",
-			wantNamespace:     "team-a",
-		},
-		{
-			name:              "rejects mismatched explicit namespace",
-			manifestNamespace: "team-b",
-			overrideNamespace: "team-a",
-			wantNamespace:     "team-b",
-			wantErr:           "does not match",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			overrides := &clientcmd.ConfigOverrides{}
-			overrides.Context.Namespace = test.overrideNamespace
-			rawConfig := clientcmdapi.Config{
-				CurrentContext: "test",
-				Clusters: map[string]*clientcmdapi.Cluster{
-					"test": {Server: "https://example.invalid"},
-				},
-				Contexts: map[string]*clientcmdapi.Context{
-					"test": {Cluster: "test", Namespace: test.contextNamespace},
-				},
-			}
-			options := &commandOptions{
-				clientConfig: clientcmd.NewDefaultClientConfig(rawConfig, overrides),
-			}
-			binding := &resourcepoolv1alpha1.ResourcePoolBinding{
-				ObjectMeta: metav1.ObjectMeta{Namespace: test.manifestNamespace},
-			}
-			err := options.defaultApplyNamespace(binding)
-			if test.wantErr == "" && err != nil {
-				t.Fatalf("defaultApplyNamespace() error = %v", err)
-			}
-			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
-				t.Fatalf("defaultApplyNamespace() error = %v, want substring %q", err, test.wantErr)
-			}
-			if binding.Namespace != test.wantNamespace {
-				t.Errorf("binding namespace = %q, want %q", binding.Namespace, test.wantNamespace)
-			}
-		})
-	}
-}
-
-func TestDeviceAssignAcceptsObjectName(t *testing.T) {
+func TestPoolListNameOutput(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	device := &resourcepoolv1alpha1.GPUDevice{
-		ObjectMeta: metav1.ObjectMeta{Name: "device-object", ResourceVersion: "1"},
-		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
-			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
-		},
-	}
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(device).Build()
 	output := &bytes.Buffer{}
-	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
-	command.SetArgs([]string{"device", "assign", "device-object", "--pool", "training-a"})
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+			&resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "training-a"}},
+		).Build(),
+		out: output, errOut: output,
+	})
+	command.SetArgs([]string{"pool", "list", "-o", "name"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
+		t.Fatalf("pool list error = %v", err)
 	}
-	updated := &resourcepoolv1alpha1.GPUDevice{}
-	if err := cli.Get(context.Background(), client.ObjectKey{Name: device.Name}, updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated.Spec.PoolRef == nil || updated.Spec.PoolRef.Name != "training-a" {
-		t.Fatalf("updated pool = %#v", updated.Spec.PoolRef)
+	if got, want := strings.TrimSpace(output.String()), "resourcepool.resource.hami.io/training-a"; got != want {
+		t.Fatalf("pool list = %q, want %q", got, want)
 	}
 }
 
-func TestDecodeResourcePoolObjectAddsManagedLabels(t *testing.T) {
+func TestDefaultApplyNamespace(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name, manifest, context, override, want, wantErr string
+	}{
+		{name: "explicit override", override: "team-a", want: "team-a"},
+		{name: "kubeconfig context", context: "team-a", want: "team-a"},
+		{name: "manifest namespace", manifest: "team-b", context: "team-a", want: "team-b"},
+		{name: "matching explicit namespace", manifest: "team-a", override: "team-a", want: "team-a"},
+		{name: "override conflict", manifest: "team-b", override: "team-a", want: "team-b", wantErr: "does not match"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			overrides := &clientcmd.ConfigOverrides{}
+			overrides.Context.Namespace = test.override
+			options := &commandOptions{clientConfig: clientcmd.NewDefaultClientConfig(clientcmdapi.Config{
+				CurrentContext: "test",
+				Clusters: map[string]*clientcmdapi.Cluster{
+					"test": {Server: "https://example.invalid"},
+				},
+				Contexts: map[string]*clientcmdapi.Context{
+					"test": {Cluster: "test", Namespace: test.context},
+				},
+			}, overrides)}
+			binding := &resourcepoolv1alpha1.ResourcePoolBinding{ObjectMeta: metav1.ObjectMeta{Namespace: test.manifest}}
+			err := options.defaultApplyNamespace(binding)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("defaultApplyNamespace() error = %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("defaultApplyNamespace() error = %v, want %q", err, test.wantErr)
+			}
+			if binding.Namespace != test.want {
+				t.Errorf("binding namespace = %q, want %q", binding.Namespace, test.want)
+			}
+		})
+	}
+}
+
+func TestDeviceAssignInputForms(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"}
-	raw := fmt.Appendf(nil, `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"%s"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolRef":{"name":"training-a"}}}`, resourcepoolv1alpha1.DeviceObjectName(identity))
-	object, err := decodeResourcePoolObject(raw)
-	if err != nil {
-		t.Fatalf("decodeResourcePoolObject() error = %v", err)
+	tests := []struct {
+		name, deviceName string
+		args             []string
+	}{
+		{name: "object name", deviceName: "device-object", args: []string{"device", "assign", "device-object", "--pool", "training-a"}},
+		{name: "physical identity", deviceName: resourcepoolv1alpha1.DeviceObjectName(identity), args: []string{"device", "assign", "--node", "node-a", "--device-id", "GPU-A", "--pool", "training-a"}},
 	}
-	device, ok := object.(*resourcepoolv1alpha1.GPUDevice)
-	if !ok {
-		t.Fatalf("object type = %T", object)
-	}
-	if device.Labels[resourcepoolv1alpha1.PoolLabel] != "training-a" || device.Labels[resourcepoolv1alpha1.DeviceTypeLabel] != "nvidia" {
-		t.Fatalf("managed labels = %v", device.Labels)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			device := &resourcepoolv1alpha1.GPUDevice{ObjectMeta: metav1.ObjectMeta{Name: test.deviceName, ResourceVersion: "1"}, Spec: resourcepoolv1alpha1.GPUDeviceSpec{Identity: identity}}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(device).Build()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			updated := &resourcepoolv1alpha1.GPUDevice{}
+			if err := cli.Get(t.Context(), client.ObjectKey{Name: device.Name}, updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Spec.PoolRef == nil || updated.Spec.PoolRef.Name != "training-a" {
+				t.Fatalf("updated pool = %#v", updated.Spec.PoolRef)
+			}
+		})
 	}
 
-	bindingRaw := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePoolBinding","metadata":{"name":"training-a","namespace":"team-a"},"spec":{"poolRef":{"name":"training-a"}}}`)
-	object, err = decodeResourcePoolObject(bindingRaw)
-	if err != nil {
-		t.Fatalf("decode ResourcePoolBinding error = %v", err)
+	invalid := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"device", "assign", "--node", "node-a", "--pool", "training-a"}, want: "both --node and --device-id"},
+		{args: []string{"device", "assign", "--device-id", "GPU-A", "--pool", "training-a"}, want: "both --node and --device-id"},
+		{args: []string{"device", "assign", "device-object", "--node", "node-a", "--device-id", "GPU-A", "--pool", "training-a"}, want: "cannot be combined"},
 	}
-	binding, ok := object.(*resourcepoolv1alpha1.ResourcePoolBinding)
-	if !ok {
-		t.Fatalf("binding object type = %T", object)
-	}
-	if binding.Labels[resourcepoolv1alpha1.PoolLabel] != "training-a" {
-		t.Fatalf("binding managed labels = %v", binding.Labels)
+	for _, test := range invalid {
+		command := newRootCommand(&commandOptions{client: fake.NewClientBuilder().WithScheme(scheme).Build(), out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+		command.SetArgs(test.args)
+		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("Execute(%v) error = %v, want %q", test.args, err, test.want)
+		}
 	}
 }
 
@@ -553,6 +502,43 @@ func TestDecodeAndApplyResourcePoolPreservesWorkloadDefaults(t *testing.T) {
 	}
 }
 
+func TestDecodeResourcePoolObjectAddsManagedLabels(t *testing.T) {
+	t.Parallel()
+	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"}
+	deviceRaw := fmt.Appendf(nil, `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"%s"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolRef":{"name":"training-a"}}}`, resourcepoolv1alpha1.DeviceObjectName(identity))
+	bindingRaw := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePoolBinding","metadata":{"name":"training-a","namespace":"team-a"},"spec":{"poolRef":{"name":"training-a"}}}`)
+
+	tests := []struct {
+		name     string
+		raw      []byte
+		wantType client.Object
+		want     map[string]string
+	}{
+		{name: "GPUDevice", raw: deviceRaw, wantType: &resourcepoolv1alpha1.GPUDevice{}, want: map[string]string{
+			resourcepoolv1alpha1.PoolLabel: "training-a", resourcepoolv1alpha1.DeviceTypeLabel: "nvidia",
+		}},
+		{name: "ResourcePoolBinding", raw: bindingRaw, wantType: &resourcepoolv1alpha1.ResourcePoolBinding{}, want: map[string]string{
+			resourcepoolv1alpha1.PoolLabel: "training-a",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			object, err := decodeResourcePoolObject(test.raw)
+			if err != nil {
+				t.Fatalf("decodeResourcePoolObject() error = %v", err)
+			}
+			if got, want := reflect.TypeOf(object), reflect.TypeOf(test.wantType); got != want {
+				t.Fatalf("object type = %v, want %v", got, want)
+			}
+			for key, want := range test.want {
+				if got := object.GetLabels()[key]; got != want {
+					t.Errorf("label %q = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestApplyGPUDeviceUsesManifestResourceVersionAsOptimisticPrecondition(t *testing.T) {
 	t.Parallel()
 	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"}
@@ -653,7 +639,7 @@ func TestApplyGPUDeviceRejectsIdentityMismatch(t *testing.T) {
 	}
 }
 
-func TestApplyGPUDevicePatchCarriesResourceVersionPrecondition(t *testing.T) {
+func TestApplyGPUDeviceRejectsConcurrentAssignment(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
@@ -665,22 +651,17 @@ func TestApplyGPUDevicePatchCarriesResourceVersionPrecondition(t *testing.T) {
 		Spec:       resourcepoolv1alpha1.GPUDeviceSpec{Identity: identity},
 	}
 	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(current).Build()
-	patchCalled := false
 	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
 		Patch: func(ctx context.Context, _ client.WithWatch, object client.Object, patch client.Patch, _ ...client.PatchOption) error {
-			patchCalled = true
 			data, err := patch.Data(object)
-			if err != nil {
-				t.Fatalf("build optimistic patch: %v", err)
-			}
-			if !strings.Contains(string(data), `"resourceVersion":"7"`) {
-				t.Fatalf("patch = %s, want resourceVersion precondition", data)
+			if err != nil || !strings.Contains(string(data), `"resourceVersion":"7"`) {
+				t.Fatalf("optimistic patch = %s, %v", data, err)
 			}
 			latest := current.DeepCopy()
 			latest.Spec.PoolRef = &resourcepoolv1alpha1.PoolReference{Name: "concurrent-pool"}
 			latest.Labels = resourcepoolv1alpha1.PoolLabels(latest)
 			if err := baseClient.Update(ctx, latest); err != nil {
-				t.Fatalf("simulate concurrent GPUDevice update: %v", err)
+				t.Fatalf("simulate concurrent update: %v", err)
 			}
 			return apierrors.NewConflict(schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "gpudevices"}, object.GetName(), fmt.Errorf("concurrent update"))
 		},
@@ -688,12 +669,9 @@ func TestApplyGPUDevicePatchCarriesResourceVersionPrecondition(t *testing.T) {
 	requested := current.DeepCopy()
 	requested.Spec.PoolRef = &resourcepoolv1alpha1.PoolReference{Name: "new-pool"}
 
-	err := applyResourcePoolObject(context.Background(), cli, requested)
-	if !patchCalled {
-		t.Fatal("optimistic patch was not attempted")
-	}
+	err := applyResourcePoolObject(t.Context(), cli, requested)
 	if !apierrors.IsConflict(err) || !strings.Contains(err.Error(), "current pool is concurrent-pool") {
-		t.Fatalf("applyResourcePoolObject() error = %v, want conflict with current pool", err)
+		t.Fatalf("applyResourcePoolObject() error = %v, want current concurrent assignment", err)
 	}
 }
 
