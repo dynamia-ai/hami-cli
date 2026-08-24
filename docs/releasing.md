@@ -37,7 +37,11 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 - 阿里云 OSS
 - S3 兼容对象存储
 
-稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。滚动版使用 Actions artifact 在 build 和 publish job 之间传递制品；发布成功后立即删除，发布失败时最多保留 1 天用于诊断。Actions artifact 不是公开分发端点，稳定版不上传 Actions artifact。
+稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。
+
+两个发布工作流均设置 `DOCKER_BUILD_RECORD_UPLOAD: "false"`。`docker/build-push-action` 继续生成 Docker build summary，但不上传 `.dockerbuild` Actions artifact。
+
+滚动版仍使用显式创建的 `release-binaries-<version>` Actions artifact 在 build 和 publish job 之间传递制品。发布成功后立即删除，发布失败时最多保留 1 天用于诊断。该 Actions artifact 不是公开分发端点。稳定版不上传发布载荷 Actions artifact。
 
 发布成功后，workflow run summary 会列出：
 
