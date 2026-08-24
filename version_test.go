@@ -90,3 +90,59 @@ func TestResolveCLIBuildInfoUsesTaggedModuleVersion(t *testing.T) {
 		t.Errorf("Version = %q, want v1.2.3", got.Version)
 	}
 }
+
+func TestResolveCLIBuildInfoResourcePoolAPIRevision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		buildInfo *debug.BuildInfo
+		want      string
+	}{
+		{
+			name: "pseudo-version",
+			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path:    resourcePoolAPIModulePath,
+				Version: "v0.0.0-20260824104039-b85d4c6f1d21",
+			}}},
+			want: "b85d4c6f1d21",
+		},
+		{
+			name: "replacement pseudo-version",
+			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path: resourcePoolAPIModulePath,
+				Replace: &debug.Module{
+					Path:    resourcePoolAPIModulePath,
+					Version: "v0.0.0-20260824110000-cafebabefeed",
+				},
+			}}},
+			want: "cafebabefeed",
+		},
+		{
+			name:      "missing dependency",
+			buildInfo: &debug.BuildInfo{},
+			want:      "unknown",
+		},
+		{
+			name: "tagged dependency",
+			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path:    resourcePoolAPIModulePath,
+				Version: "v1.2.3",
+			}}},
+			want: "unknown",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveCLIBuildInfo("devel", "unknown", "unknown", test.buildInfo)
+			if got.ResourcePoolAPIRevision != test.want {
+				t.Errorf("ResourcePoolAPIRevision = %q, want %q", got.ResourcePoolAPIRevision, test.want)
+			}
+			wantLine := "resource pool API: " + test.want
+			if !strings.Contains(got.String(), wantLine) {
+				t.Errorf("String() = %q, want line %q", got.String(), wantLine)
+			}
+		})
+	}
+}
