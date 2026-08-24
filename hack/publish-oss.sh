@@ -48,18 +48,27 @@ done
 )
 
 if [[ "$mode" = immutable ]]; then
-  versioning="$(ossutil api get-bucket-versioning \
+  # OSS ignores x-oss-forbid-overwrite when versioning is enabled or suspended.
+  versioning_output="$(ossutil api get-bucket-versioning \
     --bucket "$ALIYUN_OSS_BUCKET" --output-format json)"
-  if ! jq -e . <<< "$versioning" >/dev/null; then
+  # ossutil 2.3.0 appends an elapsed-time line to otherwise valid JSON output.
+  versioning="$(sed -E \
+    '/^[[:space:]]*[0-9]+([.][0-9]+)?\(s\) elapsed[[:space:]]*$/d' \
+    <<<"$versioning_output")"
+  if ! jq -e . <<<"$versioning" >/dev/null; then
     echo "failed to parse OSS bucket versioning state" >&2
     exit 1
   fi
   versioning_status="$(jq -r \
-    '[.. | objects | .Status? // empty] | unique | join(",")' <<< "$versioning")"
+    '[.. | objects | .Status? // empty] | unique | join(",")' <<<"$versioning")"
   case "$versioning_status" in
     ""|Disabled) ;;
+    Enabled|Suspended)
+      echo "immutable OSS publication requires versioning to be Disabled; x-oss-forbid-overwrite is ineffective when versioning is $versioning_status" >&2
+      exit 1
+      ;;
     *)
-      echo "immutable publication requires OSS bucket versioning to be disabled" >&2
+      echo "unsupported OSS bucket versioning state: $versioning_status" >&2
       exit 1
       ;;
   esac
