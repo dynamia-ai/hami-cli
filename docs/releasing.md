@@ -35,13 +35,12 @@ GoReleaser 生成五个平台归档和 `checksums.txt`：
 - 阿里云 OSS
 - S3 兼容对象存储
 
-稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。Actions artifact 用于工作流 job 之间传递和短期诊断，不是公开分发端点；访问链接同样需要登录并具有仓库读取权限。稳定版 artifact 保留 30 天，滚动版 artifact 保留 7 天。
+稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。滚动版使用 Actions artifact 在 build 和 publish job 之间传递制品；发布成功后立即删除，发布失败时最多保留 1 天用于诊断。Actions artifact 不是公开分发端点，稳定版不上传 Actions artifact。
 
 发布成功后，workflow run summary 会列出：
 
 - 每个公开文件的 OSS 和 S3 下载链接；
-- GHCR 标签引用、不可变 digest 引用和 digest；
-- 需要 GitHub 登录和仓库读取权限的 Actions artifact 链接及保留期。
+- GHCR 标签引用、不可变 digest 引用和 digest。
 
 ## 不可变发布合同
 

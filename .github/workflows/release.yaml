@@ -151,18 +151,6 @@ jobs:
           printf '%s\n' "$digest" > dist/image-digest.txt
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Actions artifact
-        id: actions-artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-binaries-${{ github.ref_name }}
-          path: |
-            dist/*.tar.gz
-            dist/checksums.txt
-            dist/image-digest.txt
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Install ossutil
         shell: bash
         run: |
@@ -282,9 +270,6 @@ jobs:
 
       - name: Write published artifact summary
         env:
-          ACTIONS_ARTIFACT_NAME: release-binaries-${{ github.ref_name }}
-          ACTIONS_ARTIFACT_RETENTION_DAYS: "30"
-          ACTIONS_ARTIFACT_URL: ${{ steps.actions-artifact.outputs.artifact-url }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: >-
           bash hack/write-release-summary.sh

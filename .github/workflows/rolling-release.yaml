@@ -37,7 +37,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
       image-digest: ${{ steps.image-archive.outputs.digest }}
-      artifact-url: ${{ steps.actions-artifact.outputs.artifact-url }}
+      artifact-id: ${{ steps.actions-artifact.outputs.artifact-id }}
     steps:
       - name: Require main workflow for manual publication
         if: github.event_name == 'workflow_dispatch'
@@ -182,7 +182,7 @@ jobs:
             dist/checksums.txt
             dist/hami-cli-image.tar
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   publish:
     name: Publish rolling release
@@ -193,6 +193,7 @@ jobs:
       group: rolling-release-${{ needs.build.outputs.version }}
       cancel-in-progress: false
     permissions:
+      actions: write
       contents: read
       packages: write
     steps:
@@ -365,11 +366,20 @@ jobs:
 
       - name: Write published artifact summary
         env:
-          ACTIONS_ARTIFACT_NAME: release-binaries-${{ needs.build.outputs.version }}
-          ACTIONS_ARTIFACT_RETENTION_DAYS: "7"
-          ACTIONS_ARTIFACT_URL: ${{ needs.build.outputs.artifact-url }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           VERSION: ${{ needs.build.outputs.version }}
         run: >-
           bash release-control/hack/write-release-summary.sh
           "$VERSION" dist "$IMAGE" "$IMAGE_DIGEST"
+
+      - name: Delete rolling release payload
+        if: success()
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          gh api --method DELETE \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
