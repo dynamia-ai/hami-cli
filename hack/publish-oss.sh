@@ -62,9 +62,16 @@ if [[ "$mode" = immutable ]]; then
   versioning_status="$(jq -r \
     '[.. | objects | .Status? // empty] | unique | join(",")' <<<"$versioning")"
   case "$versioning_status" in
-    ""|Disabled) ;;
-    Enabled|Suspended)
-      echo "immutable OSS publication requires versioning to be Disabled; x-oss-forbid-overwrite is ineffective when versioning is $versioning_status" >&2
+    ""|Disabled)
+      immutable_upload_strategy=forbid-overwrite
+      ;;
+    Enabled)
+      # Version history makes controlled retries recoverable, but OSS ignores
+      # x-oss-forbid-overwrite. Compare the current object before and after upload.
+      immutable_upload_strategy=versioned-compare
+      ;;
+    Suspended)
+      echo "unsupported OSS bucket versioning state: Suspended" >&2
       exit 1
       ;;
     *)
@@ -79,9 +86,12 @@ download_and_compare() {
   local artifact="$2"
   local existing
   existing="$(mktemp)"
-  ossutil cp "$object" "$existing" --force >/dev/null
+  if ! ossutil cp "$object" "$existing" --force >/dev/null; then
+    rm -f "$existing"
+    return 1
+  fi
   if ! cmp "$artifact" "$existing"; then
-    echo "refusing to overwrite immutable OSS object: $object" >&2
+    echo "immutable OSS object content differs: $object" >&2
     rm -f "$existing"
     return 1
   fi
@@ -110,16 +120,23 @@ for artifact in "${artifacts[@]}"; do
     fi
     rm -f "$lookup_error"
 
-    upload_error="$(mktemp)"
-    if ossutil api put-object \
+    put_object_args=(api put-object \
       --bucket "$ALIYUN_OSS_BUCKET" \
       --key "$key" \
       --body "file://$artifact" \
-      --forbid-overwrite=true \
       --object-acl public-read \
       --cache-control "$cache_control" \
-      --content-type "$content_type" >/dev/null 2>"$upload_error"; then
+      --content-type "$content_type")
+    if [[ "$immutable_upload_strategy" = forbid-overwrite ]]; then
+      put_object_args+=(--forbid-overwrite=true)
+    fi
+
+    upload_error="$(mktemp)"
+    if ossutil "${put_object_args[@]}" >/dev/null 2>"$upload_error"; then
       rm -f "$upload_error"
+      if [[ "$immutable_upload_strategy" = versioned-compare ]]; then
+        download_and_compare "$object" "$artifact"
+      fi
       continue
     fi
     if grep -Eqi '409|FileAlreadyExists' "$upload_error"; then

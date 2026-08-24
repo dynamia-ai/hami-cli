@@ -32,8 +32,18 @@ ossutil() {
         "$OSSUTIL_VERSIONING_STATUS"
       ;;
     stat\ *)
+      if [[ "$OSSUTIL_OBJECT_STATE" = exists ]]; then
+        return 0
+      fi
       echo '404 NoSuchKey' >&2
       return 1
+      ;;
+    cp\ *)
+      if [[ "$OSSUTIL_DOWNLOAD_RESULT" = same ]]; then
+        command cp "$OSSUTIL_DIST_DIR/${2##*/}" "$3"
+      else
+        printf '%s\n' different-content >"$3"
+      fi
       ;;
     "api put-object")
       return 0
@@ -48,6 +58,9 @@ export -f ossutil
 
 export OSSUTIL_CALL_LOG="$test_dir/ossutil.log"
 export OSSUTIL_VERSIONING_STATUS=Disabled
+export OSSUTIL_OBJECT_STATE=missing
+export OSSUTIL_DOWNLOAD_RESULT=same
+export OSSUTIL_DIST_DIR="$dist_dir"
 export ALIYUN_OSS_ACCESS_KEY_ID=test-access-key
 export ALIYUN_OSS_ACCESS_KEY_SECRET=test-secret-key
 export ALIYUN_OSS_BUCKET=test-bucket
@@ -60,24 +73,70 @@ test "$(grep -c 'get-bucket-versioning' "$OSSUTIL_CALL_LOG")" -eq 1
 test "$(grep -c '^stat ' "$OSSUTIL_CALL_LOG")" -eq 7
 test "$(grep -c '^api put-object ' "$OSSUTIL_CALL_LOG")" -eq 7
 test "$(grep -c -- '--forbid-overwrite=true' "$OSSUTIL_CALL_LOG")" -eq 7
+! grep -q '^cp ' "$OSSUTIL_CALL_LOG"
 
 export OSSUTIL_CALL_LOG="$test_dir/versioning-enabled-ossutil.log"
 export OSSUTIL_VERSIONING_STATUS=Enabled
+bash "$repo_root/hack/publish-oss.sh" immutable v1.2.3 "$dist_dir"
+
+test "$(grep -c 'get-bucket-versioning' "$OSSUTIL_CALL_LOG")" -eq 1
+test "$(grep -c '^stat ' "$OSSUTIL_CALL_LOG")" -eq 7
+test "$(grep -c '^api put-object ' "$OSSUTIL_CALL_LOG")" -eq 7
+test "$(grep -c '^cp ' "$OSSUTIL_CALL_LOG")" -eq 7
+! grep -q -- '--forbid-overwrite=true' "$OSSUTIL_CALL_LOG"
+
+export OSSUTIL_CALL_LOG="$test_dir/versioning-enabled-existing-ossutil.log"
+export OSSUTIL_OBJECT_STATE=exists
+bash "$repo_root/hack/publish-oss.sh" immutable v1.2.3 "$dist_dir"
+
+test "$(grep -c '^stat ' "$OSSUTIL_CALL_LOG")" -eq 7
+test "$(grep -c '^cp ' "$OSSUTIL_CALL_LOG")" -eq 7
+! grep -q '^api put-object ' "$OSSUTIL_CALL_LOG"
+
+export OSSUTIL_CALL_LOG="$test_dir/versioning-enabled-mismatch-ossutil.log"
+export OSSUTIL_DOWNLOAD_RESULT=different
 if bash "$repo_root/hack/publish-oss.sh" immutable v1.2.3 "$dist_dir" \
-  >"$test_dir/versioning-enabled.log" 2>&1; then
-  echo 'immutable publication must reject a versioning-enabled OSS bucket' >&2
+  >"$test_dir/versioning-enabled-mismatch.log" 2>&1; then
+  echo 'immutable publication must reject different existing content' >&2
   exit 1
 fi
-grep -Fq \
-  'x-oss-forbid-overwrite is ineffective when versioning is Enabled' \
-  "$test_dir/versioning-enabled.log"
-test "$(grep -c 'get-bucket-versioning' "$OSSUTIL_CALL_LOG")" -eq 1
-! grep -Eq '^(stat|api put-object) ' "$OSSUTIL_CALL_LOG"
+grep -Fq 'immutable OSS object content differs' \
+  "$test_dir/versioning-enabled-mismatch.log"
+test "$(grep -c '^stat ' "$OSSUTIL_CALL_LOG")" -eq 1
+test "$(grep -c '^cp ' "$OSSUTIL_CALL_LOG")" -eq 1
+! grep -q '^api put-object ' "$OSSUTIL_CALL_LOG"
+
+export OSSUTIL_CALL_LOG="$test_dir/versioning-enabled-post-upload-mismatch-ossutil.log"
+export OSSUTIL_OBJECT_STATE=missing
+export OSSUTIL_DOWNLOAD_RESULT=different
+if bash "$repo_root/hack/publish-oss.sh" immutable v1.2.3 "$dist_dir" \
+  >"$test_dir/versioning-enabled-post-upload-mismatch.log" 2>&1; then
+  echo 'immutable publication must verify versioned uploads' >&2
+  exit 1
+fi
+grep -Fq 'immutable OSS object content differs' \
+  "$test_dir/versioning-enabled-post-upload-mismatch.log"
+test "$(grep -c '^stat ' "$OSSUTIL_CALL_LOG")" -eq 1
+test "$(grep -c '^api put-object ' "$OSSUTIL_CALL_LOG")" -eq 1
+test "$(grep -c '^cp ' "$OSSUTIL_CALL_LOG")" -eq 1
+
+export OSSUTIL_CALL_LOG="$test_dir/versioning-suspended-ossutil.log"
+export OSSUTIL_VERSIONING_STATUS=Suspended
+if bash "$repo_root/hack/publish-oss.sh" immutable v1.2.3 "$dist_dir" \
+  >"$test_dir/versioning-suspended.log" 2>&1; then
+  echo 'immutable publication must reject a versioning-suspended OSS bucket' >&2
+  exit 1
+fi
+grep -Fq 'unsupported OSS bucket versioning state: Suspended' \
+  "$test_dir/versioning-suspended.log"
+! grep -Eq '^(stat|api put-object|cp) ' "$OSSUTIL_CALL_LOG"
 
 export OSSUTIL_CALL_LOG="$test_dir/mutable-ossutil.log"
+export OSSUTIL_DOWNLOAD_RESULT=same
 bash "$repo_root/hack/publish-oss.sh" mutable v1.2.3 "$dist_dir"
 
 ! grep -q 'get-bucket-versioning' "$OSSUTIL_CALL_LOG"
 ! grep -q '^stat ' "$OSSUTIL_CALL_LOG"
 test "$(grep -c '^api put-object ' "$OSSUTIL_CALL_LOG")" -eq 6
 ! grep -q -- '--forbid-overwrite=true' "$OSSUTIL_CALL_LOG"
+! grep -q '^cp ' "$OSSUTIL_CALL_LOG"
