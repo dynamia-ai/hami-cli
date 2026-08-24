@@ -42,6 +42,7 @@ lint:
 test:
 	GOWORK=off $(GO) test -race -covermode=atomic -coverprofile="$(GO_COVERAGE_FILE)" $(GO_PACKAGES)
 	test -s "$(GO_COVERAGE_FILE)"
+	bash hack/verify-release-archives_test.sh
 	bash hack/write-release-summary_test.sh
 
 verify-build:
@@ -80,6 +81,7 @@ build-image-arm64:
 
 package-release:
 	RELEASE_VERSION="$(VERSION)" $(GORELEASER) release --snapshot --clean
+	bash hack/verify-release-archives.sh dist
 
 release-check:
 	$(GORELEASER) check

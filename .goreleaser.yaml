@@ -41,7 +41,7 @@ archives:
     builds_info:
       mtime: "{{ .CommitDate }}"
     files:
-      - LICENSE
+      - none*
 
 checksum:
   name_template: checksums.txt

@@ -325,7 +325,3 @@ make ci
 ```
 
 发布渠道、Actions 配置和不可变发布约束见 [发布维护说明](docs/releasing.md)。厂商运行时插件的目标边界见 [架构说明](docs/architecture.md)。
-
-## License
-
-本项目使用 [Apache License 2.0](LICENSE)。

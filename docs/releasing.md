@@ -28,6 +28,8 @@ GoReleaser 生成五个平台归档和 `checksums.txt`：
 - `darwin/arm64`
 - `windows/amd64`
 
+每个平台归档只包含对应平台的 `hami-cli` 可执行文件。发布流程在上传前检查归档内容。如果归档包含其他文件，发布流程停止。
+
 稳定版还发布 `image-digest.txt`。所有通道都会构建并发布 `linux/amd64`、`linux/arm64` 多架构 GHCR 镜像。
 
 发布任务会将二进制制品写入两个公开下载后端：

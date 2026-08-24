@@ -109,6 +109,9 @@ jobs:
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
 
+      - name: Verify release archive contents
+        run: bash hack/verify-release-archives.sh dist
+
       - name: Prepare image context from release binaries
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
 
@@ -134,7 +137,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
-            org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source-date-epoch }}
           provenance: false
