@@ -92,7 +92,7 @@ hami-cli binding list
 | `hami-cli binding list` | 查看命名空间与资源池的绑定关系 |
 | `hami-cli bind/unbind` | 授予或撤销命名空间对资源池的访问权 |
 | `hami-cli apply -f` | 从 YAML、JSON 或标准输入应用资源池对象 |
-| `hami-cli version` | 查看版本、源码 revision、构建时间和目标平台 |
+| `hami-cli version` | 查看版本、源码 revision、资源池 API revision、构建时间和目标平台 |
 | `hami-cli completion` | 生成 Bash、Zsh、Fish 或 PowerShell 补全脚本 |
 
 ### 查看资源池、设备和绑定

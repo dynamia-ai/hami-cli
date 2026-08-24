@@ -30,14 +30,17 @@ var (
 	cliBuildDate = "unknown"
 )
 
+const resourcePoolAPIModulePath = "github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api"
+
 type cliBuildInfo struct {
-	Version    string
-	Revision   string
-	CommitDate string
-	BuildDate  string
-	GoVersion  string
-	Compiler   string
-	Platform   string
+	Version                 string
+	Revision                string
+	ResourcePoolAPIRevision string
+	CommitDate              string
+	BuildDate               string
+	GoVersion               string
+	Compiler                string
+	Platform                string
 }
 
 func currentCLIBuildInfo() cliBuildInfo {
@@ -75,14 +78,35 @@ func resolveCLIBuildInfo(version, revision, buildDate string, buildInfo *debug.B
 	}
 
 	return cliBuildInfo{
-		Version:    version,
-		Revision:   revision,
-		CommitDate: commitDate,
-		BuildDate:  buildDate,
-		GoVersion:  runtime.Version(),
-		Compiler:   runtime.Compiler,
-		Platform:   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		Version:                 version,
+		Revision:                revision,
+		ResourcePoolAPIRevision: dependencyRevision(buildInfo, resourcePoolAPIModulePath),
+		CommitDate:              commitDate,
+		BuildDate:               buildDate,
+		GoVersion:               runtime.Version(),
+		Compiler:                runtime.Compiler,
+		Platform:                fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
 	}
+}
+
+func dependencyRevision(buildInfo *debug.BuildInfo, modulePath string) string {
+	if buildInfo == nil {
+		return "unknown"
+	}
+	for _, dependency := range buildInfo.Deps {
+		if dependency.Path != modulePath {
+			continue
+		}
+		if dependency.Replace != nil {
+			dependency = dependency.Replace
+		}
+		revision, _ := parsePseudoVersion(dependency.Version)
+		if revision != "" {
+			return revision
+		}
+		return "unknown"
+	}
+	return "unknown"
 }
 
 func parsePseudoVersion(version string) (string, string) {
@@ -105,9 +129,10 @@ func parsePseudoVersion(version string) (string, string) {
 func (info cliBuildInfo) String() string {
 	return fmt.Sprintf(`version:          %s
 revision:         %s
+resource pool API: %s
 commit date:      %s
 build date:       %s
 go version:       %s
 compiler:         %s
-platform:         %s`, info.Version, info.Revision, info.CommitDate, info.BuildDate, info.GoVersion, info.Compiler, info.Platform)
+platform:         %s`, info.Version, info.Revision, info.ResourcePoolAPIRevision, info.CommitDate, info.BuildDate, info.GoVersion, info.Compiler, info.Platform)
 }
