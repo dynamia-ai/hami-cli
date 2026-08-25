@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +43,49 @@ func TestRootCommandUsesKubectlPluginDisplayNameAndStandardFlags(t *testing.T) {
 		if command.PersistentFlags().Lookup(name) == nil {
 			t.Errorf("missing standard Kubernetes flag --%s", name)
 		}
+	}
+}
+
+func TestSkillInstallCopiesEmbeddedResourcePoolSkill(t *testing.T) {
+	home := t.TempDir()
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		out:       output,
+		errOut:    output,
+		kitupHome: home,
+		kitupCWD:  t.TempDir(),
+	})
+	command.SetArgs([]string{"skill", "install", "--scope", "user", "--agent", "codex", "--yes"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, output = %q", err, output.String())
+	}
+
+	target := filepath.Join(home, ".agents", "skills", "managing-hami-resource-pools")
+	for _, path := range []string{
+		"SKILL.md",
+		filepath.Join("agents", "openai.yaml"),
+		filepath.Join("references", "operations.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(target, path)); err != nil {
+			t.Errorf("installed skill file %q: %v", path, err)
+		}
+	}
+
+	metadataBytes, err := os.ReadFile(filepath.Join(target, ".kitup.json"))
+	if err != nil {
+		t.Fatalf("read kitup metadata: %v", err)
+	}
+	metadata := struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		AppID         string `json:"appId"`
+		SkillName     string `json:"skillName"`
+		Source        string `json:"source"`
+	}{}
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		t.Fatalf("decode kitup metadata: %v", err)
+	}
+	if metadata.SchemaVersion != 1 || metadata.AppID != "hami-cli" || metadata.SkillName != "managing-hami-resource-pools" || metadata.Source != "bundled" {
+		t.Fatalf("kitup metadata = %+v", metadata)
 	}
 }
 

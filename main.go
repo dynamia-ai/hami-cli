@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,10 +38,17 @@ type commandOptions struct {
 	out          io.Writer
 	errOut       io.Writer
 	executable   string
+	stdinTTY     bool
+	kitupHome    string
+	kitupCWD     string
 }
 
 func main() {
-	options := &commandOptions{out: os.Stdout, errOut: os.Stderr}
+	options := &commandOptions{
+		out:      os.Stdout,
+		errOut:   os.Stderr,
+		stdinTTY: term.IsTerminal(int(os.Stdin.Fd())),
+	}
 	command := newRootCommand(options)
 	if err := command.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -68,6 +76,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		newBindCommand(options),
 		newUnbindCommand(options),
 		newApplyCommand(options),
+		newSkillCommand(options),
 		newVersionCommand(options),
 	)
 	command.InitDefaultCompletionCmd()

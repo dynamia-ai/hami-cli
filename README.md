@@ -60,6 +60,28 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
 
 将 `VERSION` 替换为已发布标签或其他可解析的 Go 模块版本。公开用户应使用预编译归档。
 
+### 安装 Agent Skill
+
+发布的 `hami-cli` 二进制内置与当前版本匹配的资源池管理 Skill。安装二进制后，运行以下命令，将 Skill 安装到本机已检测到的 Agent：
+
+```bash
+hami-cli skill install
+```
+
+非交互场景需要显式指定作用域和 Agent。例如，将 Skill 安装到 Codex 用户目录：
+
+```bash
+hami-cli skill install --scope user --agent codex --yes
+```
+
+Codex 用户作用域支持 `~/.agents/skills` 和兼容目录 `~/.codex/skills`。安装器优先复用已存在的兼容目录；两个目录都不存在时，使用 `~/.agents/skills`。项目作用域安装到当前项目的 `.agents/skills/managing-hami-resource-pools`：
+
+```bash
+hami-cli skill install --scope project --agent codex --yes
+```
+
+使用 `--dry-run` 可以在写入文件前查看安装计划。安装器会写入 `.kitup.json` 所有权元数据；目标目录存在但不属于 `hami-cli` 时，默认报告冲突，不覆盖已有内容。
+
 ## 连接集群
 
 使用资源池命令前，确认以下条件：
@@ -91,6 +113,7 @@ hami-cli binding list
 | `hami-cli binding list` | 查看命名空间与资源池的绑定关系 |
 | `hami-cli bind/unbind` | 授予或撤销命名空间对资源池的访问权 |
 | `hami-cli apply -f` | 从 YAML、JSON 或标准输入应用资源池对象 |
+| `hami-cli skill install` | 将二进制内置的资源池管理 Skill 安装到本地 Agent |
 | `hami-cli version` | 查看版本、源码 revision、资源池 API revision、构建时间和目标平台 |
 | `hami-cli completion` | 生成 Bash、Zsh、Fish 或 PowerShell 补全脚本 |
 
