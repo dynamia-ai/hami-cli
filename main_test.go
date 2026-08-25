@@ -125,6 +125,51 @@ func TestPoolListStructuredOutputPreservesExtensionFields(t *testing.T) {
 	}
 }
 
+func TestDeviceListTableAlignsLongValues(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-d5d6dc2483b9831539b52b8ba053dc3d"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{
+				NodeName: "izbp13trb08in2bs1nduw7z",
+				DeviceID: "GPU-ceee905d-48ac-93de-a81b-17c00e1e5e02",
+			},
+			PoolRef: &resourcepoolv1alpha1.PoolReference{Name: "shared-gpu"},
+		},
+	}
+	device.Status.Discovered = true
+	device.Status.Healthy = false
+
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(device).Build(),
+		out:    output, errOut: output,
+	})
+	command.SetArgs([]string{"device", "list"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("device list error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("device list output has %d lines, want 2: %q", len(lines), output.String())
+	}
+	if strings.Contains(output.String(), "\t") {
+		t.Fatalf("device list output contains unexpanded tabs: %q", output.String())
+	}
+	headings := []string{"NAME", "NODE", "DEVICE-ID", "POOL", "DISCOVERED", "HEALTHY"}
+	values := []string{device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Spec.PoolRef.Name, "true", "false"}
+	for i := range headings {
+		if got, want := strings.Index(lines[1], values[i]), strings.Index(lines[0], headings[i]); got != want {
+			t.Errorf("column %s starts at %d in data row, want header position %d; output:\n%s", headings[i], got, want, output.String())
+		}
+	}
+}
+
 func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
