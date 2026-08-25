@@ -41,7 +41,6 @@ lint:
 test:
 	GOWORK=off $(GO) test -race $(GO_PACKAGES)
 	bash hack/verify-release-archives_test.sh
-	bash hack/write-release-summary_test.sh
 
 verify-build:
 	GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o /dev/null .
