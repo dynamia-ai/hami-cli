@@ -173,7 +173,17 @@ hami-cli device unassign \
   --device-id GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 ```
 
-设备归属更新带有资源版本前置条件。对象被其他客户端并发修改时，命令返回冲突，不会覆盖更新后的状态。删除资源池前，需要先移除设备归属和其他引用：
+在共享集群中清理临时设备归属时，同时指定操作前记录的设备 UID 和资源池名称：
+
+```bash
+hami-cli device unassign GPUDEVICE_NAME \
+  --expected-uid DEVICE_UID \
+  --expected-pool training
+```
+
+`--expected-uid` 和 `--expected-pool` 必须同时使用。当前 UID 或资源池名称不符合预期时，命令停止且不修改设备。设备归属更新还带有资源版本前置条件；对象在命令读取后被其他客户端并发修改时，命令返回冲突，不会覆盖更新后的状态。
+
+删除资源池前，需要先移除设备归属和其他引用：
 
 ```bash
 hami-cli pool delete training

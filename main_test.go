@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -363,6 +364,168 @@ func TestDeviceAssignInputForms(t *testing.T) {
 		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("Execute(%v) error = %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+func TestDeviceUnassignExpectedOwnershipPreconditions(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name         string
+		uid          string
+		pool         string
+		args         []string
+		wantErr      string
+		wantAssigned bool
+	}{
+		{
+			name: "unguarded unassign",
+			uid:  "device-uid",
+			pool: "temporary-pool",
+			args: []string{"device", "unassign", "device-a"},
+		},
+		{
+			name: "matching ownership preconditions",
+			uid:  "device-uid",
+			pool: "temporary-pool",
+			args: []string{"device", "unassign", "device-a", "--expected-uid", "device-uid", "--expected-pool", "temporary-pool"},
+		},
+		{
+			name:         "unexpected uid",
+			uid:          "replacement-uid",
+			pool:         "temporary-pool",
+			args:         []string{"device", "unassign", "device-a", "--expected-uid", "device-uid", "--expected-pool", "temporary-pool"},
+			wantErr:      `UID is "replacement-uid", expected "device-uid"`,
+			wantAssigned: true,
+		},
+		{
+			name:         "unexpected pool",
+			uid:          "device-uid",
+			pool:         "production-pool",
+			args:         []string{"device", "unassign", "device-a", "--expected-uid", "device-uid", "--expected-pool", "temporary-pool"},
+			wantErr:      `pool is "production-pool", expected "temporary-pool"`,
+			wantAssigned: true,
+		},
+		{
+			name:         "expected uid without pool",
+			uid:          "device-uid",
+			pool:         "temporary-pool",
+			args:         []string{"device", "unassign", "device-a", "--expected-uid", "device-uid"},
+			wantErr:      "--expected-uid and --expected-pool must be used together",
+			wantAssigned: true,
+		},
+		{
+			name:         "expected pool without uid",
+			uid:          "device-uid",
+			pool:         "temporary-pool",
+			args:         []string{"device", "unassign", "device-a", "--expected-pool", "temporary-pool"},
+			wantErr:      "--expected-uid and --expected-pool must be used together",
+			wantAssigned: true,
+		},
+		{
+			name:         "empty ownership precondition",
+			uid:          "device-uid",
+			pool:         "temporary-pool",
+			args:         []string{"device", "unassign", "device-a", "--expected-uid=", "--expected-pool", "temporary-pool"},
+			wantErr:      "--expected-uid and --expected-pool must not be empty",
+			wantAssigned: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			device := &resourcepoolv1alpha1.GPUDevice{
+				ObjectMeta: metav1.ObjectMeta{Name: "device-a", UID: types.UID(test.uid), ResourceVersion: "1"},
+				Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+					PoolRef: &resourcepoolv1alpha1.PoolReference{Name: test.pool},
+				},
+			}
+			device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(device).Build()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+			command.SetArgs(test.args)
+
+			err := command.Execute()
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("Execute() error = %v, want substring %q", err, test.wantErr)
+			}
+
+			updated := &resourcepoolv1alpha1.GPUDevice{}
+			if err := cli.Get(t.Context(), client.ObjectKey{Name: device.Name}, updated); err != nil {
+				t.Fatal(err)
+			}
+			if test.wantAssigned {
+				if updated.Spec.PoolRef == nil || updated.Spec.PoolRef.Name != test.pool {
+					t.Fatalf("updated pool = %#v, want unchanged %q", updated.Spec.PoolRef, test.pool)
+				}
+			} else if updated.Spec.PoolRef != nil {
+				t.Fatalf("updated pool = %#v, want unassigned", updated.Spec.PoolRef)
+			}
+		})
+	}
+}
+
+func TestDeviceUnassignOwnershipGuardRejectsConcurrentReassignment(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	current := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", UID: "device-uid", ResourceVersion: "7"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			PoolRef: &resourcepoolv1alpha1.PoolReference{Name: "temporary-pool"},
+		},
+	}
+	current.Labels = resourcepoolv1alpha1.PoolLabels(current)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(current).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, _ client.WithWatch, object client.Object, patch client.Patch, _ ...client.PatchOption) error {
+			data, err := patch.Data(object)
+			if err != nil {
+				t.Fatalf("encode optimistic patch: %v", err)
+			}
+			optimistic := make(map[string]any)
+			if err := sigsyaml.Unmarshal(data, &optimistic); err != nil {
+				t.Fatalf("decode optimistic patch: %v", err)
+			}
+			resourceVersion, found, err := unstructured.NestedString(optimistic, "metadata", "resourceVersion")
+			if err != nil || !found || resourceVersion != "7" {
+				t.Fatalf("optimistic patch resourceVersion = %q, found = %v, error = %v", resourceVersion, found, err)
+			}
+
+			latest := current.DeepCopy()
+			latest.Spec.PoolRef = &resourcepoolv1alpha1.PoolReference{Name: "production-pool"}
+			latest.Labels = resourcepoolv1alpha1.PoolLabels(latest)
+			if err := baseClient.Update(ctx, latest); err != nil {
+				t.Fatalf("simulate concurrent reassignment: %v", err)
+			}
+			return apierrors.NewConflict(schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "gpudevices"}, object.GetName(), fmt.Errorf("concurrent update"))
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"device", "unassign", "device-a", "--expected-uid", "device-uid", "--expected-pool", "temporary-pool"})
+
+	err := command.Execute()
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("Execute() error = %v, want conflict", err)
+	}
+	updated := &resourcepoolv1alpha1.GPUDevice{}
+	if err := baseClient.Get(t.Context(), client.ObjectKey{Name: current.Name}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.PoolRef == nil || updated.Spec.PoolRef.Name != "production-pool" {
+		t.Fatalf("updated pool = %#v, want concurrent production-pool assignment preserved", updated.Spec.PoolRef)
 	}
 }
 

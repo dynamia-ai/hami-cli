@@ -120,15 +120,19 @@ If the lifecycle includes a temporary binding, create it through the temporary r
 
 ```bash
 "${HAMI[@]}" unbind --namespace team-a --pool "$HAMI_POOL"
-"${HAMI[@]}" device unassign GPUDEVICE_NAME
+"${HAMI[@]}" device unassign GPUDEVICE_NAME \
+  --expected-uid "$HAMI_DEVICE_UID" \
+  --expected-pool "$HAMI_POOL"
 "${HAMI[@]}" pool delete "$HAMI_POOL"
 ```
 
 Run those commands only after their guards succeed:
 
 - Unbind only a session-created binding after the same-UID re-read and under exclusive coordination.
-- Unassign only a session-modified device with the same UID whose original pool was empty and whose current pool is the session-created pool.
+- Unassign only a session-modified device whose original pool was empty. Set `HAMI_DEVICE_UID` from the pre-assignment structured read and pass both ownership flags shown above. The command rejects a different current UID or pool, and its optimistic patch rejects changes after the internal read.
 - Delete only a session-created pool with the same recorded UID after all references are absent.
+
+`--expected-uid` and `--expected-pool` must be used together. Omitting both retains the unguarded manual behavior and is not ownership-safe for temporary cleanup in a shared cluster.
 
 For an intentional permanent move, verify the requested final assignment instead of running temporary cleanup. If a planned workflow must restore a non-empty original pool, use `device assign --pool ORIGINAL_POOL` only after re-reading the same device UID and obtaining explicit authorization; never replace it with `unassign`.
 

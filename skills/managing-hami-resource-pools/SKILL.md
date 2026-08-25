@@ -23,7 +23,7 @@ Use this skill for audits, namespace access, pool lifecycle, GPU ownership, clea
    - Audit: read only.
    - User-owned desired state: use `apply` so an identical manifest is rerunnable.
    - Temporary test relation: require absence, use `bind`, record its UID, exclude concurrent writers, and re-check the UID immediately before `unbind`.
-   - GPU move: proceed only with explicit authorization and current device/allocation evidence.
+   - GPU move: proceed only with explicit authorization and current device/allocation evidence. For temporary cleanup, record the device UID and use `device unassign` with both `--expected-uid` and `--expected-pool`.
 4. Mutate the smallest object set. Prefer `bind`/`unbind`, `device assign`/`device unassign`, and `pool create`/`pool delete` over hand-edited manifests.
 5. Verify controller-observed state. For temporary changes, clean up in reverse reference order and compare final maps with the baseline; for persistent changes, prove the intended delta and unchanged unrelated state.
 
@@ -38,5 +38,6 @@ Read [references/operations.md](references/operations.md) before executing mutat
 - `unbind` and `pool delete` are name-based deletes without UID preconditions. If concurrent replacement cannot be excluded, automated temporary cleanup is not ownership-safe.
 - `unbind` affects future Pod authorization. It does not evict existing Pods or reclaim their GPUs.
 - An empty allocation list does not exclude concurrent scheduling. Coordinate a scheduling freeze or obtain owner confirmation before moving a live GPU.
+- `device unassign` without ownership flags clears the assignment observed by its internal read. Temporary cleanup must pass both `--expected-uid` and `--expected-pool` so an earlier replacement or reassignment fails closed; a later change conflicts with the command's optimistic patch.
 - `pool delete` is asynchronous because reference-protection finalizers may delay removal. Wait for absence; never strip the finalizer to make a test pass.
 - On conflicts, forbidden responses, unknown resource types, timeouts, or ambiguous writes, re-read state and fail closed. Do not bypass RBAC or TLS validation.
