@@ -28,20 +28,4 @@ for archive in "$dist_dir"/*.tar.gz; do
   [[ "${archive##*/}" = "hami-cli_${tag}_"*.tar.gz ]]
 done
 bash "$script_dir/verify-release-archives.sh" "$dist_dir"
-existing_assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
-
-for artifact in "${artifacts[@]}"; do
-  name="${artifact##*/}"
-  if grep -Fxq "$name" <<< "$existing_assets"; then
-    download_dir="$(mktemp -d)"
-    gh release download "$tag" --pattern "$name" --dir "$download_dir"
-    if ! cmp "$artifact" "$download_dir/$name"; then
-      echo "refusing to overwrite immutable GitHub Release asset: $name" >&2
-      rm -rf "$download_dir"
-      exit 1
-    fi
-    rm -rf "$download_dir"
-  else
-    gh release upload "$tag" "$artifact"
-  fi
-done
+gh release upload "$tag" "${artifacts[@]}" --clobber

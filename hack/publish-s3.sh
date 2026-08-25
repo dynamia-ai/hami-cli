@@ -3,15 +3,12 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-mode="${1:?usage: publish-s3.sh immutable|mutable VERSION DIST_DIR}"
-version="${2:?usage: publish-s3.sh immutable|mutable VERSION DIST_DIR}"
-dist_dir="${3:?usage: publish-s3.sh immutable|mutable VERSION DIST_DIR}"
+mode="${1:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
+version="${2:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
+dist_dir="${3:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
 
 case "$mode" in
-  immutable)
-    cache_control='public,max-age=31536000,immutable'
-    ;;
-  mutable)
+  stable|mutable)
     cache_control='no-cache,max-age=0,must-revalidate'
     ;;
   *)
@@ -37,84 +34,22 @@ aws_args=(--endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" --no-cli-pager)
 
 shopt -s nullglob
 artifacts=("$dist_dir"/*.tar.gz "$dist_dir"/*.tar.gz.sha256)
-if [[ "$mode" = immutable ]]; then
+if [[ "$mode" = stable ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
 expected_count=10
-[[ "$mode" = immutable ]] && expected_count=11
+[[ "$mode" = stable ]] && expected_count=11
 test "${#artifacts[@]}" -eq "$expected_count"
 for archive in "$dist_dir"/*.tar.gz; do
   [[ "${archive##*/}" = "hami-cli_${version}_"*.tar.gz ]]
 done
 bash "$script_dir/verify-release-archives.sh" "$dist_dir"
 
-download_and_compare() {
-  local key="$1"
-  local artifact="$2"
-  local existing
-  existing="$(mktemp)"
-  aws s3api get-object "${aws_args[@]}" \
-    --bucket "$S3_BUCKET" --key "$key" "$existing" >/dev/null
-  if ! cmp "$artifact" "$existing"; then
-    echo "refusing to overwrite immutable S3 object: s3://$S3_BUCKET/$key" >&2
-    rm -f "$existing"
-    return 1
-  fi
-  rm -f "$existing"
-}
-
 for artifact in "${artifacts[@]}"; do
   name="${artifact##*/}"
   key="hami-cli/$version/$name"
-  object="s3://$S3_BUCKET/$key"
   content_type=application/gzip
   [[ "$name" = *.sha256 || "$name" = *.txt ]] && content_type=text/plain
-
-  if [[ "$mode" = immutable ]]; then
-    lookup_error="$(mktemp)"
-    if aws s3api head-object "${aws_args[@]}" \
-      --bucket "$S3_BUCKET" --key "$key" >/dev/null 2>"$lookup_error"; then
-      rm -f "$lookup_error"
-      download_and_compare "$key" "$artifact"
-      continue
-    fi
-    if ! grep -Eqi '\(404\)|Not Found|NoSuchKey' "$lookup_error"; then
-      echo "failed to determine whether immutable S3 object exists: $object" >&2
-      sed -n '1,20p' "$lookup_error" >&2
-      rm -f "$lookup_error"
-      exit 1
-    fi
-    rm -f "$lookup_error"
-
-    for attempt in {1..5}; do
-      upload_error="$(mktemp)"
-      if aws s3api put-object "${aws_args[@]}" \
-        --bucket "$S3_BUCKET" \
-        --key "$key" \
-        --body "$artifact" \
-        --if-none-match '*' \
-        --cache-control "$cache_control" \
-        --content-type "$content_type" >/dev/null 2>"$upload_error"; then
-        rm -f "$upload_error"
-        continue 2
-      fi
-      if grep -Eqi 'PreconditionFailed|\(412\)' "$upload_error"; then
-        rm -f "$upload_error"
-        download_and_compare "$key" "$artifact"
-        continue 2
-      fi
-      if grep -Eqi 'ConditionalRequestConflict|\(409\)' "$upload_error" \
-        && [[ "$attempt" -lt 5 ]]; then
-        rm -f "$upload_error"
-        sleep "$attempt"
-        continue
-      fi
-      echo "failed to create immutable S3 object: $object" >&2
-      sed -n '1,20p' "$upload_error" >&2
-      rm -f "$upload_error"
-      exit 1
-    done
-  fi
 
   aws s3api put-object "${aws_args[@]}" \
     --bucket "$S3_BUCKET" \
