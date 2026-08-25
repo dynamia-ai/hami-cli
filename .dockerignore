@@ -8,4 +8,6 @@ dist
 docs
 *.md
 !README.md
+# Keep Markdown bundled by go:embed available to container builds.
+!skills/**/*.md
 我对 hami-lite 产品的看法.md
