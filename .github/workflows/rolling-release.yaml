@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: rolling-release-${{ github.event_name == 'workflow_dispatch' && inputs.branch || 'latest' }}
+  # Keep the key bounded and serialize manual multi-channel publications across branches.
+  group: rolling-release-${{ github.event_name }}
   cancel-in-progress: false
 
 env:
