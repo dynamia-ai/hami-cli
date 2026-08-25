@@ -6,16 +6,30 @@ import (
 	"testing"
 )
 
+func parseCLIBuildInfoOutput(t *testing.T, output string) map[string]string {
+	t.Helper()
+	fields := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			t.Fatalf("version output line %q has no separator", line)
+		}
+		fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return fields
+}
+
 func TestResolveCLIBuildInfo(t *testing.T) {
 	t.Parallel()
 	pseudoVersion := "v0.0.0-20260817092328-9214a562258d"
 	tests := []struct {
-		name      string
-		version   string
-		revision  string
-		buildDate string
-		settings  []debug.BuildSetting
-		want      cliBuildInfo
+		name        string
+		version     string
+		revision    string
+		buildDate   string
+		mainVersion string
+		settings    []debug.BuildSetting
+		want        cliBuildInfo
 	}{
 		{
 			name:      "pseudo-version metadata",
@@ -42,36 +56,41 @@ func TestResolveCLIBuildInfo(t *testing.T) {
 			buildDate: "2026-08-17T10:00:00Z",
 			want:      cliBuildInfo{Version: "latest", Revision: "abc123", CommitDate: "2026-08-17T09:23:28Z", BuildDate: "2026-08-17T10:00:00Z"},
 		},
+		{
+			name:        "tagged module version",
+			version:     "devel",
+			revision:    "unknown",
+			buildDate:   "unknown",
+			mainVersion: "v1.2.3",
+			want:        cliBuildInfo{Version: "v1.2.3", Revision: "unknown", CommitDate: "unknown", BuildDate: "unknown"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			mainVersion := test.mainVersion
+			if mainVersion == "" {
+				mainVersion = pseudoVersion
+			}
 			got := resolveCLIBuildInfo(test.version, test.revision, test.buildDate, &debug.BuildInfo{
-				Main:     debug.Module{Version: pseudoVersion},
+				Main:     debug.Module{Version: mainVersion},
 				Settings: test.settings,
 			})
 			if got.Version != test.want.Version || got.Revision != test.want.Revision || got.CommitDate != test.want.CommitDate || got.BuildDate != test.want.BuildDate {
 				t.Fatalf("resolveCLIBuildInfo() = %#v, want version metadata %#v", got, test.want)
 			}
-			if test.name == "release metadata" {
-				output := got.String()
-				if !strings.Contains(output, "version:          latest") ||
-					!strings.Contains(output, "commit date:      2026-08-17T09:23:28Z") ||
-					!strings.Contains(output, "build date:       2026-08-17T10:00:00Z") {
-					t.Fatalf("String() = %q", output)
+			output := parseCLIBuildInfoOutput(t, got.String())
+			for field, want := range map[string]string{
+				"version":     test.want.Version,
+				"revision":    test.want.Revision,
+				"commit date": test.want.CommitDate,
+				"build date":  test.want.BuildDate,
+			} {
+				if output[field] != want {
+					t.Errorf("version output %q = %q, want %q", field, output[field], want)
 				}
 			}
 		})
-	}
-}
-
-func TestResolveCLIBuildInfoUsesTaggedModuleVersion(t *testing.T) {
-	t.Parallel()
-	buildInfo := &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}}
-
-	got := resolveCLIBuildInfo("devel", "unknown", "unknown", buildInfo)
-	if got.Version != "v1.2.3" {
-		t.Errorf("Version = %q, want v1.2.3", got.Version)
 	}
 }
 
@@ -123,9 +142,9 @@ func TestResolveCLIBuildInfoResourcePoolAPIRevision(t *testing.T) {
 			if got.ResourcePoolAPIRevision != test.want {
 				t.Errorf("ResourcePoolAPIRevision = %q, want %q", got.ResourcePoolAPIRevision, test.want)
 			}
-			wantLine := "resource pool API: " + test.want
-			if !strings.Contains(got.String(), wantLine) {
-				t.Errorf("String() = %q, want line %q", got.String(), wantLine)
+			output := parseCLIBuildInfoOutput(t, got.String())
+			if output["resource pool API"] != test.want {
+				t.Errorf("version output resource pool API = %q, want %q", output["resource pool API"], test.want)
 			}
 		})
 	}
