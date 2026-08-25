@@ -340,29 +340,21 @@ jobs:
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public artifacts
+      - name: Verify public artifacts from OSS
         shell: bash
         env:
           VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
-            base_url="${configured_base_url%/}"
-            [[ "$base_url" = https://* ]]
-            for file in dist/*.tar.gz dist/*.tar.gz.sha256; do
-              verified=false
-              for attempt in {1..8}; do
-                if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \
-                  "$base_url/$VERSION/${file##*/}" \
-                  && cmp "$file" "$RUNNER_TEMP/${file##*/}"; then
-                  verified=true
-                  break
-                fi
-                [[ "$attempt" -lt 8 ]] && sleep 5
-              done
-              [[ "$verified" = true ]]
-            done
-          done
+        run: >-
+          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
+          "aliyun-oss=$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+
+      - name: Verify public artifacts from S3
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: >-
+          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
+          "s3=$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
       - name: Write published artifact summary
         env:
