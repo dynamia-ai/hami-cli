@@ -23,6 +23,7 @@ RUN --mount=type=secret,id=github_token,required=true \
     rm -f "${HOME}/.gitconfig"
 
 COPY *.go ./
+COPY skills/ ./skills/
 RUN --mount=type=secret,id=github_token,required=true \
     set -eu; \
     token="$(cat /run/secrets/github_token)"; \
