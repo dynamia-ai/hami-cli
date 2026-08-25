@@ -17,6 +17,7 @@ permissions:
 env:
   BUILDX_VERSION: v0.36.1
   BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
   GOPRIVATE: github.com/dynamia-ai/*
   GOLANGCI_LINT_VERSION: v2.13.1
   GORELEASER_VERSION: v2.17.1
@@ -133,6 +134,9 @@ jobs:
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/
 
+      - name: Verify release archive contents
+        run: bash hack/verify-release-archives.sh dist
+
       - name: Prepare image context from release binaries
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
 
@@ -157,7 +161,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.release.outputs.revision }}
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            org.opencontainers.image.licenses=Apache-2.0
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -179,7 +182,7 @@ jobs:
           name: release-binaries-${{ steps.release.outputs.version }}
           path: |
             dist/*.tar.gz
-            dist/checksums.txt
+            dist/*.tar.gz.sha256
             dist/hami-cli-image.tar
           if-no-files-found: error
           retention-days: 1
@@ -224,10 +227,7 @@ jobs:
           digest="$(tar -xOf dist/hami-cli-image.tar index.json \
             | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           test "$digest" = "$EXPECTED_DIGEST"
-          (
-            cd dist
-            sha256sum --check checksums.txt
-          )
+          bash release-control/hack/verify-release-archives.sh dist
 
       - name: Validate publication credentials
         env:
@@ -349,7 +349,7 @@ jobs:
           for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
             base_url="${configured_base_url%/}"
             [[ "$base_url" = https://* ]]
-            for file in dist/*.tar.gz dist/checksums.txt; do
+            for file in dist/*.tar.gz dist/*.tar.gz.sha256; do
               verified=false
               for attempt in {1..8}; do
                 if curl -fsSLo "$RUNNER_TEMP/${file##*/}" \

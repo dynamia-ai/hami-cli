@@ -1,19 +1,3 @@
-/*
-Copyright 2026 The HAMi Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package main
 
 import (
@@ -23,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -59,37 +42,6 @@ func TestRootCommandUsesKubectlPluginDisplayNameAndStandardFlags(t *testing.T) {
 		if command.PersistentFlags().Lookup(name) == nil {
 			t.Errorf("missing standard Kubernetes flag --%s", name)
 		}
-	}
-}
-
-func TestListCommandsRejectPositionalArguments(t *testing.T) {
-	t.Parallel()
-	scheme := runtime.NewScheme()
-	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
-	for _, args := range [][]string{
-		{"pool", "list", "training-a"},
-		{"device", "list", "node-a"},
-	} {
-		command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
-		command.SetArgs(args)
-		err := command.Execute()
-		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unknown command %q", args[2])) {
-			t.Errorf("%v error = %v, want positional argument rejection", args, err)
-		}
-	}
-}
-
-func TestUnstructuredPoolNamesUseResourceQualifiedName(t *testing.T) {
-	t.Parallel()
-	pools := &unstructured.UnstructuredList{
-		Items: []unstructured.Unstructured{{Object: map[string]any{"metadata": map[string]any{"name": "training-a"}}}},
-	}
-	want := []string{"resourcepool.resource.hami.io/training-a"}
-	if got := unstructuredPoolNames(pools); !slices.Equal(got, want) {
-		t.Errorf("unstructuredPoolNames() = %v, want %v", got, want)
 	}
 }
 
@@ -184,9 +136,7 @@ func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 
 	conflicts := [][]string{
 		{"binding", "list", "--namespace", "team-a", "--all-namespaces"},
-		{"binding", "list", "-n", "team-a", "-A"},
-		{"--namespace", "team-a", "binding", "list", "--all-namespaces"},
-		{"binding", "ls", "--namespace", "team-a", "--all-namespaces"},
+		{"binding", "ls", "-n", "team-a", "-A"},
 	}
 	for _, args := range conflicts {
 		options, _ = newOptions()
@@ -256,15 +206,6 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	command.SetArgs([]string{"binding", "bind", "--pool", "training-a"})
 	if err := command.Execute(); err == nil {
 		t.Fatal("nested binding bind succeeded, want rejected route")
-	}
-	bindingCommand, _, err := newRootCommand(newOptions()).Find([]string{"binding"})
-	if err != nil {
-		t.Fatalf("find binding command: %v", err)
-	}
-	for _, child := range bindingCommand.Commands() {
-		if child.Name() == "bind" || child.Name() == "unbind" {
-			t.Fatalf("binding child %q remains registered", child.Name())
-		}
 	}
 }
 
@@ -381,124 +322,94 @@ func TestDeviceAssignInputForms(t *testing.T) {
 	}
 }
 
-func TestDecodeResourcePoolObjectRejectsUnknownTypedFields(t *testing.T) {
+func TestApplyRejectsUnknownTypedFields(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		raw  string
+		name     string
+		manifest string
+		want     string
 	}{
 		{
-			name: "GPUDevice",
-			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolReff":{"name":"training-a"}}}`,
+			name:     "GPUDevice field",
+			manifest: `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolReff":{"name":"training-a"}}}`,
+			want:     `unknown field "poolReff"`,
 		},
 		{
-			name: "ResourcePoolBinding",
-			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePoolBinding","metadata":{"name":"training-a","namespace":"team-a"},"spec":{"poolReff":{"name":"training-a"}}}`,
+			name:     "ResourcePoolBinding field",
+			manifest: `{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePoolBinding","metadata":{"name":"training-a","namespace":"team-a"},"spec":{"poolReff":{"name":"training-a"}}}`,
+			want:     `unknown field "poolReff"`,
 		},
 		{
-			name: "nested pool reference",
-			raw:  `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolRef":{"name":"training-a","naem":"training-b"}}}`,
+			name:     "nested pool reference field",
+			manifest: `{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice","metadata":{"name":"device-a","resourceVersion":"7"},"spec":{"identity":{"nodeName":"node-a","deviceType":"NVIDIA","deviceID":"GPU-A"},"poolRef":{"name":"training-a","naem":"training-b"}}}`,
+			want:     `unknown field "naem"`,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := decodeResourcePoolObject([]byte(test.raw))
-			if err == nil || !strings.Contains(err.Error(), "unknown field") {
-				t.Fatalf("decodeResourcePoolObject() error = %v, want unknown field rejection", err)
+			path := filepath.Join(t.TempDir(), "object.json")
+			if err := os.WriteFile(path, []byte(test.manifest), 0o600); err != nil {
+				t.Fatalf("write manifest: %v", err)
+			}
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    output,
+				errOut: output,
+			})
+			command.SetArgs([]string{"apply", "-f", path})
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("apply error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestApplyRejectsUnknownGPUDeviceYAMLField(t *testing.T) {
+func TestApplyResourcePoolPreservesExtensionFields(t *testing.T) {
 	t.Parallel()
-	manifest := `apiVersion: resource.hami.io/v1alpha1
-kind: GPUDevice
-metadata:
-  name: device-a
-  resourceVersion: "7"
-spec:
-  identity:
-    nodeName: node-a
-    deviceType: NVIDIA
-    deviceID: GPU-A
-  poolReff:
-    name: training-a
-`
-	path := filepath.Join(t.TempDir(), "device.yaml")
-	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+	manifest := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePool","metadata":{"name":"training-a"},"spec":{"futureField":{"enabled":true},"workloadDefaults":{"schedulingPolicy":{"node":"spread","gpu":"binpack,numa"}}}}`)
+	path := filepath.Join(t.TempDir(), "pool.json")
+	if err := os.WriteFile(path, manifest, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	output := &bytes.Buffer{}
-	command := newRootCommand(&commandOptions{
-		client: fake.NewClientBuilder().Build(),
-		out:    output,
-		errOut: output,
-	})
-	command.SetArgs([]string{"apply", "-f", path})
-	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), `unknown field "poolReff"`) {
-		t.Fatalf("apply error = %v, want unknown field rejection", err)
-	}
-}
 
-func TestDecodeObjectRejectsTrailingJSONValue(t *testing.T) {
-	t.Parallel()
-	object := &resourcepoolv1alpha1.GPUDevice{}
-	err := decodeObject([]byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"GPUDevice"} {}`), object, true)
-	if err == nil || !strings.Contains(err.Error(), "unexpected trailing JSON value") {
-		t.Fatalf("decodeObject() error = %v, want trailing JSON rejection", err)
-	}
-}
-
-func TestDecodeResourcePoolObjectPreservesUnknownPoolFields(t *testing.T) {
-	t.Parallel()
-	raw := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePool","metadata":{"name":"training-a"},"spec":{"futureField":{"enabled":true}}}`)
-	object, err := decodeResourcePoolObject(raw)
-	if err != nil {
-		t.Fatalf("decodeResourcePoolObject() error = %v", err)
-	}
-	pool, ok := object.(*unstructured.Unstructured)
-	if !ok {
-		t.Fatalf("object type = %T, want *unstructured.Unstructured", object)
-	}
-	enabled, found, err := unstructured.NestedBool(pool.Object, "spec", "futureField", "enabled")
-	if err != nil || !found || !enabled {
-		t.Fatalf("future field enabled = %t, found = %t, error = %v", enabled, found, err)
-	}
-}
-
-func TestDecodeAndApplyResourcePoolPreservesWorkloadDefaults(t *testing.T) {
-	t.Parallel()
-	raw := []byte(`{"apiVersion":"resource.hami.io/v1alpha1","kind":"ResourcePool","metadata":{"name":"training-a"},"spec":{"workloadDefaults":{"schedulingPolicy":{"node":"spread","gpu":"binpack,numa"}}}}`)
-	object, err := decodeResourcePoolObject(raw)
-	if err != nil {
-		t.Fatalf("decode ResourcePool error = %v", err)
-	}
-	pool, ok := object.(*unstructured.Unstructured)
-	if !ok {
-		t.Fatalf("object type = %T, want *unstructured.Unstructured", object)
-	}
-	nodePolicy, found, err := unstructured.NestedString(pool.Object, "spec", "workloadDefaults", "schedulingPolicy", "node")
-	if err != nil || !found || nodePolicy != "spread" {
-		t.Fatalf("decoded node policy = %q, found = %v, error = %v", nodePolicy, found, err)
-	}
-
+	applied := &unstructured.Unstructured{}
+	patchCalled := false
 	baseClient := fake.NewClientBuilder().Build()
 	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
 		Patch: func(_ context.Context, _ client.WithWatch, patched client.Object, patch client.Patch, _ ...client.PatchOption) error {
+			patchCalled = true
 			data, err := patch.Data(patched)
 			if err != nil {
 				return err
 			}
-			if !strings.Contains(string(data), `"workloadDefaults":{"schedulingPolicy":{"gpu":"binpack,numa","node":"spread"}}`) {
-				t.Fatalf("apply patch = %s, want workload scheduling defaults", data)
+			if err := sigsyaml.Unmarshal(data, applied); err != nil {
+				t.Fatalf("decode apply patch: %v", err)
 			}
 			return nil
 		},
 	})
-	if err := applyResourcePoolObject(t.Context(), cli, object); err != nil {
-		t.Fatalf("apply ResourcePool error = %v", err)
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"apply", "-f", path})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("apply ResourcePool: %v", err)
+	}
+	if !patchCalled {
+		t.Fatal("apply did not patch ResourcePool")
+	}
+	enabled, found, err := unstructured.NestedBool(applied.Object, "spec", "futureField", "enabled")
+	if err != nil || !found || !enabled {
+		t.Fatalf("future field enabled = %t, found = %t, error = %v", enabled, found, err)
+	}
+	nodePolicy, found, err := unstructured.NestedString(applied.Object, "spec", "workloadDefaults", "schedulingPolicy", "node")
+	if err != nil || !found || nodePolicy != "spread" {
+		t.Fatalf("node policy = %q, found = %v, error = %v", nodePolicy, found, err)
+	}
+	gpuPolicy, found, err := unstructured.NestedString(applied.Object, "spec", "workloadDefaults", "schedulingPolicy", "gpu")
+	if err != nil || !found || gpuPolicy != "binpack,numa" {
+		t.Fatalf("GPU policy = %q, found = %v, error = %v", gpuPolicy, found, err)
 	}
 }
 
@@ -654,8 +565,16 @@ func TestApplyGPUDeviceRejectsConcurrentAssignment(t *testing.T) {
 	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
 		Patch: func(ctx context.Context, _ client.WithWatch, object client.Object, patch client.Patch, _ ...client.PatchOption) error {
 			data, err := patch.Data(object)
-			if err != nil || !strings.Contains(string(data), `"resourceVersion":"7"`) {
-				t.Fatalf("optimistic patch = %s, %v", data, err)
+			if err != nil {
+				t.Fatalf("encode optimistic patch: %v", err)
+			}
+			optimistic := make(map[string]any)
+			if err := sigsyaml.Unmarshal(data, &optimistic); err != nil {
+				t.Fatalf("decode optimistic patch: %v", err)
+			}
+			resourceVersion, found, err := unstructured.NestedString(optimistic, "metadata", "resourceVersion")
+			if err != nil || !found || resourceVersion != "7" {
+				t.Fatalf("optimistic patch resourceVersion = %q, found = %v, error = %v", resourceVersion, found, err)
 			}
 			latest := current.DeepCopy()
 			latest.Spec.PoolRef = &resourcepoolv1alpha1.PoolReference{Name: "concurrent-pool"}

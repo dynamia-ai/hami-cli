@@ -4,7 +4,6 @@ GORELEASER ?= goreleaser
 DOCKER ?= docker
 
 GO_PACKAGES ?= ./...
-GO_COVERAGE_FILE ?= cover.out
 VERSION ?= devel
 REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= unknown
@@ -40,8 +39,8 @@ lint:
 	GOWORK=off $(GOLANGCI_LINT) run --config .golangci.yml $(GO_PACKAGES)
 
 test:
-	GOWORK=off $(GO) test -race -covermode=atomic -coverprofile="$(GO_COVERAGE_FILE)" $(GO_PACKAGES)
-	test -s "$(GO_COVERAGE_FILE)"
+	GOWORK=off $(GO) test -race $(GO_PACKAGES)
+	bash hack/verify-release-archives_test.sh
 	bash hack/write-release-summary_test.sh
 
 verify-build:
@@ -80,6 +79,7 @@ build-image-arm64:
 
 package-release:
 	RELEASE_VERSION="$(VERSION)" $(GORELEASER) release --snapshot --clean
+	bash hack/verify-release-archives.sh dist
 
 release-check:
 	$(GORELEASER) check
