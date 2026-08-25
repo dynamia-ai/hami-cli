@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -110,12 +111,13 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 				return fmt.Errorf("list resource pools: %w", err)
 			}
 			sort.Slice(pools.Items, func(i, j int) bool { return pools.Items[i].Name < pools.Items[j].Name })
-			fmt.Fprintln(options.out, "NAME\tDISCOVERED\tHEALTHY\tREVISION")
+			writer := newTableWriter(options.out)
+			fmt.Fprintln(writer, "NAME\tDISCOVERED\tHEALTHY\tREVISION")
 			for i := range pools.Items {
 				pool := &pools.Items[i]
-				fmt.Fprintf(options.out, "%s\t%d\t%d\t%s\n", pool.Name, pool.Status.DiscoveredDevices, pool.Status.HealthyDevices, pool.Status.Revision)
+				fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", pool.Name, pool.Status.DiscoveredDevices, pool.Status.HealthyDevices, pool.Status.Revision)
 			}
-			return nil
+			return writer.Flush()
 		},
 	}
 	addOutputFlag(list)
@@ -201,16 +203,17 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 				devices.TypeMeta = metav1.TypeMeta{APIVersion: resourcepoolv1alpha1.GroupVersion.String(), Kind: "GPUDeviceList"}
 				return printObject(options.out, output, devices, deviceNames(devices))
 			}
-			fmt.Fprintln(options.out, "NAME\tNODE\tDEVICE-ID\tPOOL\tDISCOVERED\tHEALTHY")
+			writer := newTableWriter(options.out)
+			fmt.Fprintln(writer, "NAME\tNODE\tDEVICE-ID\tPOOL\tDISCOVERED\tHEALTHY")
 			for i := range devices.Items {
 				device := &devices.Items[i]
 				pool := "<unassigned>"
 				if device.Spec.PoolRef != nil {
 					pool = device.Spec.PoolRef.Name
 				}
-				fmt.Fprintf(options.out, "%s\t%s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, pool, device.Status.Discovered, device.Status.Healthy)
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, pool, device.Status.Discovered, device.Status.Healthy)
 			}
-			return nil
+			return writer.Flush()
 		},
 	}
 	list.Flags().StringVar(&nodeName, "node", "", "Only show devices on this Node")
@@ -351,17 +354,22 @@ func newBindingListCommand(options *commandOptions) *cobra.Command {
 				bindings.TypeMeta = metav1.TypeMeta{APIVersion: resourcepoolv1alpha1.GroupVersion.String(), Kind: "ResourcePoolBindingList"}
 				return printObject(options.out, output, bindings, bindingNames(bindings))
 			}
-			fmt.Fprintln(options.out, "NAMESPACE\tNAME\tPOOL\tBOUND")
+			writer := newTableWriter(options.out)
+			fmt.Fprintln(writer, "NAMESPACE\tNAME\tPOOL\tBOUND")
 			for i := range bindings.Items {
 				binding := &bindings.Items[i]
-				fmt.Fprintf(options.out, "%s\t%s\t%s\t%s\n", binding.Namespace, binding.Name, binding.Spec.PoolRef.Name, bindingConditionStatus(binding))
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", binding.Namespace, binding.Name, binding.Spec.PoolRef.Name, bindingConditionStatus(binding))
 			}
-			return nil
+			return writer.Flush()
 		},
 	}
 	command.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "List bindings across all namespaces")
 	addOutputFlag(command)
 	return command
+}
+
+func newTableWriter(out io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 }
 
 func newBindCommand(options *commandOptions) *cobra.Command {
