@@ -34,8 +34,12 @@ artifacts=("$dist_dir"/*.tar.gz "$dist_dir"/*.tar.gz.sha256)
 if [[ "$mode" = stable ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
+if [[ "$version" = latest ]]; then
+  artifacts+=("$dist_dir/install.sh")
+fi
 expected_count=10
 [[ "$mode" = stable ]] && expected_count=11
+[[ "$version" = latest ]] && expected_count=11
 test "${#artifacts[@]}" -eq "$expected_count"
 for archive in "$dist_dir"/*.tar.gz; do
   [[ "${archive##*/}" = "hami-cli_${version}_"*.tar.gz ]]
@@ -47,6 +51,10 @@ for artifact in "${artifacts[@]}"; do
   key="hami-cli/$version/$name"
   content_type=application/gzip
   [[ "$name" = *.sha256 || "$name" = *.txt ]] && content_type=text/plain
+  if [[ "$name" = install.sh ]]; then
+    key=hami-cli/install.sh
+    content_type=text/x-shellscript
+  fi
 
   ossutil api put-object \
     --bucket "$ALIYUN_OSS_BUCKET" \

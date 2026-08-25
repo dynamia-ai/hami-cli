@@ -55,6 +55,13 @@ done
 if [[ -f "$dist_dir/image-digest.txt" ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
+if [[ "$version" = latest ]]; then
+  if [[ ! -f "$dist_dir/install.sh" ]]; then
+    echo "missing one-line installer: $dist_dir/install.sh" >&2
+    exit 1
+  fi
+  artifacts+=("$dist_dir/install.sh")
+fi
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
@@ -126,6 +133,7 @@ for endpoint in "$@"; do
   for artifact in "${artifacts[@]}"; do
     name="${artifact##*/}"
     url="$base_url/$version/$name"
+    [[ "$name" = install.sh ]] && url="$base_url/install.sh"
     expected_digest="$("${checksum_command[@]}" "$artifact" | awk '{ print $1 }')"
     download="$workdir/$backend-$name"
     headers="$workdir/$backend-$name.headers"

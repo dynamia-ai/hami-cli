@@ -40,6 +40,7 @@ lint:
 
 test:
 	GOWORK=off $(GO) test -race $(GO_PACKAGES)
+	bash hack/install_test.sh
 	bash hack/verify-release-archives_test.sh
 
 verify-build:

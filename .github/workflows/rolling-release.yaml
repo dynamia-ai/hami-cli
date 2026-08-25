@@ -137,6 +137,10 @@ jobs:
       - name: Verify release archive contents
         run: bash hack/verify-release-archives.sh dist
 
+      - name: Stage one-line installer
+        if: steps.release.outputs.version == 'latest'
+        run: install -m 0755 install.sh dist/install.sh
+
       - name: Prepare image context from release binaries
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
 
@@ -183,6 +187,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/install.sh
             dist/hami-cli-image.tar
           if-no-files-found: error
           retention-days: 1
@@ -228,6 +233,12 @@ jobs:
             | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           test "$digest" = "$EXPECTED_DIGEST"
           bash release-control/hack/verify-release-archives.sh dist
+          if [[ "$VERSION" = latest ]]; then
+            test -s dist/install.sh
+            cmp dist/install.sh release-control/install.sh
+          else
+            test ! -e dist/install.sh
+          fi
 
       - name: Validate publication credentials
         env:

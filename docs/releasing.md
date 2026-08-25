@@ -39,6 +39,8 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 
 稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。
 
+`main` 的 `latest` 发布还会将仓库根目录的 `install.sh` 写入两个公开下载前缀的 `install.sh`。安装脚本本身是可变入口，默认安装 `latest`，并在运行时下载对应平台归档和 `.sha256` 校验文件，再调用二进制内置的 Skill 安装器。手动触发的分支版不会覆盖公共安装脚本。
+
 两个发布工作流均设置 `DOCKER_BUILD_RECORD_UPLOAD: "false"`。`docker/build-push-action` 继续生成 Docker build summary，但不上传 `.dockerbuild` Actions artifact。
 
 滚动版仍使用显式创建的 `release-binaries-<version>` Actions artifact 在 build 和 publish job 之间传递制品。发布成功后立即删除，发布失败时最多保留 1 天用于诊断。该 Actions artifact 不是公开分发端点。稳定版不上传发布载荷 Actions artifact。
@@ -46,6 +48,7 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 发布成功后，workflow run summary 会列出：
 
 - 每个公开文件的 OSS 和 S3 下载链接；
+- `latest` 发布的一键安装脚本 OSS 和 S3 链接；
 - GHCR 标签引用、不可变 digest 引用和 digest。
 
 ## 稳定版覆盖合同
@@ -63,7 +66,7 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 
 ## 公开可用性验证
 
-对象存储上传成功不等于公开地址可以下载。稳定版和滚动版将 OSS 和 S3 回读显示为独立步骤，并使用同一个脚本逐个下载文件、比较 SHA-256。脚本验证不带缓存绕过参数的正式下载 URL。下载失败或内容不一致时，脚本最多尝试 8 次，每次间隔 5 秒。验证仍然失败时，发布任务停止，也不会写入成功 Summary。
+对象存储上传成功不等于公开地址可以下载。稳定版和滚动版将 OSS 和 S3 回读显示为独立步骤，并使用同一个脚本逐个下载文件、比较 SHA-256。`latest` 发布还会回读根路径的 `install.sh` 并与本次构建载荷比较。脚本验证不带缓存绕过参数的正式下载 URL。下载失败或内容不一致时，脚本最多尝试 8 次，每次间隔 5 秒。验证仍然失败时，发布任务停止，也不会写入成功 Summary。
 
 每个文件验证成功后，日志记录后端名称、文件名、SHA-256、HTTP 状态和尝试次数。验证失败时，日志和 workflow run summary 记录以下信息：
 
