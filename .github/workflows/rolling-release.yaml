@@ -137,6 +137,10 @@ jobs:
       - name: Verify release archive contents
         run: bash hack/verify-release-archives.sh dist
 
+      - name: Stage one-line installer
+        if: steps.release.outputs.version == 'latest'
+        run: bash hack/prepare-installers.sh dist
+
       - name: Prepare image context from release binaries
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
 
@@ -183,6 +187,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/install-*.sh
             dist/hami-cli-image.tar
           if-no-files-found: error
           retention-days: 1
@@ -228,6 +233,17 @@ jobs:
             | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           test "$digest" = "$EXPECTED_DIGEST"
           bash release-control/hack/verify-release-archives.sh dist
+          if [[ "$VERSION" = latest ]]; then
+            trusted_installers="$(mktemp -d)"
+            bash release-control/hack/prepare-installers.sh "$trusted_installers"
+            test -s dist/install-oss.sh
+            test -s dist/install-r2.sh
+            cmp dist/install-oss.sh "$trusted_installers/install-oss.sh"
+            cmp dist/install-r2.sh "$trusted_installers/install-r2.sh"
+          else
+            test ! -e dist/install-oss.sh
+            test ! -e dist/install-r2.sh
+          fi
 
       - name: Validate publication credentials
         env:
@@ -343,6 +359,7 @@ jobs:
       - name: Verify public artifacts from OSS
         shell: bash
         env:
+          PUBLIC_INSTALLER_ARTIFACT: install-oss.sh
           VERSION: ${{ needs.build.outputs.version }}
         run: >-
           bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
@@ -351,6 +368,7 @@ jobs:
       - name: Verify public artifacts from S3
         shell: bash
         env:
+          PUBLIC_INSTALLER_ARTIFACT: install-r2.sh
           VERSION: ${{ needs.build.outputs.version }}
         run: >-
           bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist

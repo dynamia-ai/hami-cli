@@ -29,6 +29,10 @@ done
 if [[ -f "$dist_dir/image-digest.txt" ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
+if [[ "$version" = latest ]]; then
+  test -f "$dist_dir/install-oss.sh"
+  test -f "$dist_dir/install-r2.sh"
+fi
 
 for artifact in "${artifacts[@]}"; do
   test -f "$artifact"
@@ -44,8 +48,12 @@ done
   echo '| --- | --- |'
   for artifact in "${artifacts[@]}"; do
     name="${artifact##*/}"
-    echo "| \`$name\` | [OSS]($oss_base_url/$version/$name) · [S3]($s3_base_url/$version/$name) |"
+    path="$version/$name"
+    echo "| \`$name\` | [OSS]($oss_base_url/$path) · [S3]($s3_base_url/$path) |"
   done
+  if [[ "$version" = latest ]]; then
+    echo "| \`install.sh\` | [OSS]($oss_base_url/install.sh) · [S3]($s3_base_url/install.sh) |"
+  fi
   echo
   echo '### Container image'
   echo

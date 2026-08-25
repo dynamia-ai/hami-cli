@@ -55,6 +55,22 @@ done
 if [[ -f "$dist_dir/image-digest.txt" ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
+installer_artifact=
+if [[ "$version" = latest ]]; then
+  case "${PUBLIC_INSTALLER_ARTIFACT:-}" in
+    install-oss.sh | install-r2.sh) ;;
+    *)
+      echo "PUBLIC_INSTALLER_ARTIFACT must be install-oss.sh or install-r2.sh for latest" >&2
+      exit 2
+      ;;
+  esac
+  installer_artifact="$dist_dir/$PUBLIC_INSTALLER_ARTIFACT"
+  if [[ ! -f "$installer_artifact" ]]; then
+    echo "missing one-line installer: $installer_artifact" >&2
+    exit 1
+  fi
+  artifacts+=("$installer_artifact")
+fi
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
@@ -125,11 +141,14 @@ for endpoint in "$@"; do
 
   for artifact in "${artifacts[@]}"; do
     name="${artifact##*/}"
-    url="$base_url/$version/$name"
+    public_name="$name"
+    [[ -n "$installer_artifact" && "$artifact" = "$installer_artifact" ]] && public_name=install.sh
+    url="$base_url/$version/$public_name"
+    [[ "$public_name" = install.sh ]] && url="$base_url/install.sh"
     expected_digest="$("${checksum_command[@]}" "$artifact" | awk '{ print $1 }')"
-    download="$workdir/$backend-$name"
-    headers="$workdir/$backend-$name.headers"
-    metadata="$workdir/$backend-$name.metadata"
+    download="$workdir/$backend-$public_name"
+    headers="$workdir/$backend-$public_name.headers"
+    metadata="$workdir/$backend-$public_name.metadata"
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
       rm -f "$download" "$headers" "$metadata"
@@ -148,7 +167,7 @@ for endpoint in "$@"; do
       if ((curl_exit == 0)) && [[ "$actual_digest" = "$expected_digest" ]]; then
         http_status="$(sed -n 's/^http_status=//p' "$metadata")"
         printf 'verified public artifact: backend=%s artifact=%s sha256=%s http_status=%s attempt=%d/%d\n' \
-          "$backend" "$name" "$expected_digest" "$http_status" "$attempt" "$attempts"
+          "$backend" "$public_name" "$expected_digest" "$http_status" "$attempt" "$attempts"
         break
       fi
 
@@ -156,7 +175,7 @@ for endpoint in "$@"; do
       ((curl_exit == 0)) || failure_reason=download_failed
 
       printf 'public artifact verification attempt failed: backend=%s artifact=%s reason=%s attempt=%d/%d curl_exit=%d expected_sha256=%s actual_sha256=%s url=%s\n' \
-        "$backend" "$name" "$failure_reason" "$attempt" "$attempts" "$curl_exit" \
+        "$backend" "$public_name" "$failure_reason" "$attempt" "$attempts" "$curl_exit" \
         "$expected_digest" "$actual_digest" "$url" >&2
       cat "$metadata" >&2
       print_response_headers "$headers" >&2
@@ -167,7 +186,7 @@ for endpoint in "$@"; do
         continue
       fi
 
-      append_failure_summary "$backend" "$name" "$url" "$expected_digest" \
+      append_failure_summary "$backend" "$public_name" "$url" "$expected_digest" \
         "$actual_digest" "$curl_exit" "$failure_reason" "$metadata" "$headers"
       exit 1
     done
