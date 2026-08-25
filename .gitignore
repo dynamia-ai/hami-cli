@@ -33,6 +33,9 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Test binary, built with `go test -c`
+*.test
+
 # Go workspace file
 go.work
 go.work.sum

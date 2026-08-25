@@ -314,6 +314,7 @@ kubectl auth can-i create resourcepoolbindings.resource.hami.io -n team-a
 
 ```bash
 GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go build -o bin/hami-cli .
+GOPRIVATE=github.com/dynamia-ai/* GOWORK=off go test ./...
 ```
 
 提交前运行仓库完整检查：
