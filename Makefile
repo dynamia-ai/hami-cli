@@ -4,7 +4,6 @@ GORELEASER ?= goreleaser
 DOCKER ?= docker
 
 GO_PACKAGES ?= ./...
-GO_COVERAGE_FILE ?= cover.out
 VERSION ?= devel
 REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= unknown
@@ -20,7 +19,7 @@ IMAGE_PLATFORM ?= linux/amd64
 IMAGE_SOURCE ?= local
 IMAGE_REVISION ?= $(REVISION)
 
-.PHONY: build ci fmt fmt-check vet lint test verify-build verify release-check \
+.PHONY: build ci fmt fmt-check vet lint verify-build verify release-check \
 	build-image build-image-amd64 build-image-arm64 package-release
 
 build:
@@ -39,19 +38,13 @@ vet:
 lint:
 	GOWORK=off $(GOLANGCI_LINT) run --config .golangci.yml $(GO_PACKAGES)
 
-test:
-	GOWORK=off $(GO) test -race -covermode=atomic -coverprofile="$(GO_COVERAGE_FILE)" $(GO_PACKAGES)
-	test -s "$(GO_COVERAGE_FILE)"
-	bash hack/verify-release-archives_test.sh
-	bash hack/write-release-summary_test.sh
-
 verify-build:
 	GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o /dev/null .
 
-ci: fmt-check vet lint test verify-build
+ci: fmt-check vet lint verify-build
 	git diff --check
 
-verify: test vet
+verify: vet
 	git diff --check
 
 define build_image

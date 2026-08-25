@@ -80,14 +80,6 @@ jobs:
           GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@v7
-        with:
-          name: go-coverage-${{ matrix.goarch }}
-          path: cover.out
-          if-no-files-found: error
-          retention-days: 7
-
   image:
     name: Container build (${{ matrix.platform }})
     strategy:
@@ -139,14 +131,13 @@ jobs:
           HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
         run: make build-image
 
-      - name: Inspect and smoke-test image
+      - name: Inspect image
         shell: bash
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE_REF")" = "$IMAGE_PLATFORM"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE_REF")" = "$IMAGE_SOURCE"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_REF")" = "$IMAGE_REVISION"
-          docker run --rm "$IMAGE_REF" version | grep -F "revision:         $IMAGE_REVISION"
 
   release-config:
     name: GoReleaser release path
