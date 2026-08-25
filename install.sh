@@ -4,8 +4,10 @@ set -eu
 
 version="${HAMI_CLI_VERSION:-latest}"
 install_dir="${HAMI_CLI_INSTALL_DIR:-/usr/local/bin}"
-primary_base_url="${HAMI_CLI_BASE_URL:-https://storage.dynamia.ai/hami-cli}"
-fallback_base_url="https://public.hami.run/hami-cli"
+default_base_url="https://storage.dynamia.ai/hami-cli"
+default_fallback_base_url="https://public.hami.run/hami-cli"
+primary_base_url="${HAMI_CLI_BASE_URL:-$default_base_url}"
+fallback_base_url="$default_fallback_base_url"
 
 fail() {
   printf 'hami-cli installer: %s\n' "$*" >&2

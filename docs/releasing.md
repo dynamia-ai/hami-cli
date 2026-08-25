@@ -39,7 +39,7 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 
 稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。
 
-`main` 的 `latest` 发布还会将仓库根目录的 `install.sh` 写入两个公开下载前缀的 `install.sh`。安装脚本本身是可变入口，默认安装 `latest`，并在运行时下载对应平台归档和 `.sha256` 校验文件，再调用二进制内置的 Skill 安装器。手动触发的分支版不会覆盖公共安装脚本。
+`main` 的 `latest` 发布还会基于仓库根目录的 `install.sh` 生成两份后端专用脚本，并分别写入两个公开下载前缀的 `install.sh`。OSS 脚本默认从 OSS 下载，R2 脚本默认从 R2 下载；主后端失败或校验不通过时，两者会互相回退。安装脚本本身是可变入口，默认安装 `latest`，并在运行时下载对应平台归档和 `.sha256` 校验文件，再调用二进制内置的 Skill 安装器。手动触发的分支版不会覆盖公共安装脚本。
 
 两个发布工作流均设置 `DOCKER_BUILD_RECORD_UPLOAD: "false"`。`docker/build-push-action` 继续生成 Docker build summary，但不上传 `.dockerbuild` Actions artifact。
 

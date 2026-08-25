@@ -14,13 +14,13 @@ Linux 和 macOS 用户可以用一行命令安装随 `main` 更新的 `latest` �
 curl -fsSL https://storage.dynamia.ai/hami-cli/install.sh | sh
 ```
 
-R2 提供相同的安装脚本，可在 OSS 地址不可用时直接使用：
+R2 也提供相同路径的一行安装入口，可在 OSS 地址不可用时直接使用：
 
 ```bash
 curl -fsSL https://public.hami.run/hami-cli/install.sh | sh
 ```
 
-脚本自动识别操作系统和 CPU 架构，从 OSS 下载对应归档；下载失败时自动切换到 R2。安装前会使用同目录下的 `.sha256` 文件校验归档，默认将二进制安装到 `/usr/local/bin/hami-cli`，然后将内置 Skill 安装到本机已检测到的 Agent 用户目录。写入 `/usr/local/bin` 需要提权时，脚本会调用 `sudo`。
+脚本自动识别操作系统和 CPU 架构，并优先从脚本所在的后端下载对应归档：OSS 脚本使用 OSS，R2 脚本使用 R2。主后端下载失败或校验不通过时会自动切换到另一个后端。安装前会使用同目录下的 `.sha256` 文件校验归档，默认将二进制安装到 `/usr/local/bin/hami-cli`，然后将内置 Skill 安装到本机已检测到的 Agent 用户目录。写入 `/usr/local/bin` 需要提权时，脚本会调用 `sudo`。
 
 非交互环境未检测到 Agent，或需要指定目标 Agent 时，在 `sh` 命令前设置 `HAMI_CLI_AGENT`。例如指定 Codex：
 

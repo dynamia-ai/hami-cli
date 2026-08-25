@@ -38,7 +38,7 @@ if [[ "$mode" = stable ]]; then
   artifacts+=("$dist_dir/image-digest.txt")
 fi
 if [[ "$version" = latest ]]; then
-  artifacts+=("$dist_dir/install.sh")
+  artifacts+=("$dist_dir/install-r2.sh")
 fi
 expected_count=10
 [[ "$mode" = stable ]] && expected_count=11
@@ -54,7 +54,7 @@ for artifact in "${artifacts[@]}"; do
   key="hami-cli/$version/$name"
   content_type=application/gzip
   [[ "$name" = *.sha256 || "$name" = *.txt ]] && content_type=text/plain
-  if [[ "$name" = install.sh ]]; then
+  if [[ "$name" = install-r2.sh ]]; then
     key=hami-cli/install.sh
     content_type=text/x-shellscript
   fi

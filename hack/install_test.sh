@@ -56,6 +56,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$url" in
+  https://storage.dynamia.ai/*)
+    root=$FIXTURE_ROOT
+    path=${url#https://storage.dynamia.ai/}
+    ;;
   https://fixtures.invalid/*)
     root=$FIXTURE_ROOT
     path=${url#https://fixtures.invalid/}
@@ -66,28 +70,52 @@ case "$url" in
     ;;
   *) exit 22 ;;
 esac
+printf '%s\n' "$url" >> "$CURL_INVOCATIONS"
 cp "$root/$path" "$output"
 EOF
 chmod 0755 "$test_dir/mock-bin/curl"
 
+rendered_dir="$test_dir/rendered"
+bash "$repo_root/hack/prepare-installers.sh" "$rendered_dir"
+grep -Fx 'default_base_url="https://storage.dynamia.ai/hami-cli"' "$rendered_dir/install-oss.sh"
+grep -Fx 'default_base_url="https://public.hami.run/hami-cli"' "$rendered_dir/install-r2.sh"
+
+curl_invocations="$test_dir/curl-invocations"
+: > "$curl_invocations"
 PATH="$test_dir/mock-bin:$PATH" \
   HOME="$test_dir/home" \
   FIXTURE_ROOT="$fixture_root" \
   FALLBACK_FIXTURE_ROOT="$fallback_fixture_root" \
-  HAMI_CLI_BASE_URL=https://fixtures.invalid/hami-cli \
+  CURL_INVOCATIONS="$curl_invocations" \
   HAMI_CLI_INSTALL_DIR="$test_dir/install-bin" \
   HAMI_CLI_AGENT=codex \
-  sh "$repo_root/install.sh"
+  sh "$rendered_dir/install-oss.sh"
 
 test -x "$test_dir/install-bin/hami-cli"
+test "$(sed -n '1p' "$curl_invocations")" = \
+  "https://storage.dynamia.ai/hami-cli/$version/$archive"
 grep -Fx 'skill install --scope user --yes --agent codex' "$test_dir/home/hami-cli-invocations"
 grep -Fx 'version' "$test_dir/home/hami-cli-invocations"
+
+: > "$curl_invocations"
+PATH="$test_dir/mock-bin:$PATH" \
+  HOME="$test_dir/home" \
+  FIXTURE_ROOT="$fixture_root" \
+  FALLBACK_FIXTURE_ROOT="$fallback_fixture_root" \
+  CURL_INVOCATIONS="$curl_invocations" \
+  HAMI_CLI_INSTALL_DIR="$test_dir/r2-bin" \
+  HAMI_CLI_AGENT=codex \
+  sh "$rendered_dir/install-r2.sh"
+test -x "$test_dir/r2-bin/hami-cli"
+test "$(sed -n '1p' "$curl_invocations")" = \
+  "https://public.hami.run/hami-cli/$version/$archive"
 
 printf '%064d\n' 0 > "$release_dir/$archive.sha256"
 PATH="$test_dir/mock-bin:$PATH" \
   HOME="$test_dir/home" \
   FIXTURE_ROOT="$fixture_root" \
   FALLBACK_FIXTURE_ROOT="$fallback_fixture_root" \
+  CURL_INVOCATIONS="$curl_invocations" \
   HAMI_CLI_BASE_URL=https://fixtures.invalid/hami-cli \
   HAMI_CLI_INSTALL_DIR="$test_dir/fallback-bin" \
   HAMI_CLI_AGENT=codex \
@@ -99,6 +127,7 @@ if PATH="$test_dir/mock-bin:$PATH" \
   HOME="$test_dir/home" \
   FIXTURE_ROOT="$fixture_root" \
   FALLBACK_FIXTURE_ROOT="$fallback_fixture_root" \
+  CURL_INVOCATIONS="$curl_invocations" \
   HAMI_CLI_BASE_URL=https://fixtures.invalid/hami-cli \
   HAMI_CLI_INSTALL_DIR="$test_dir/install-bin" \
   HAMI_CLI_AGENT=codex \
