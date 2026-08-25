@@ -29,6 +29,7 @@ case "$install_dir" in
   /) ;;
   */) install_dir=${install_dir%/} ;;
 esac
+default_install_dir="$HOME/.local/bin"
 
 case "$version" in
   '' | *[!a-z0-9._-]* | [._-]*) fail "invalid version: $version" ;;
@@ -167,8 +168,8 @@ completion_prefix=${install_dir%/}
 case "$completion_prefix" in
   */bin) completion_prefix=${completion_prefix%/bin} ;;
 esac
-bash_completion_dir="$HOME/.local/share/bash-completion/completions"
-zsh_completion_dir="$HOME/.local/share/zsh/site-functions"
+bash_completion_dir="$completion_prefix/share/bash-completion/completions"
+zsh_completion_dir="$completion_prefix/share/zsh/site-functions"
 case "${XDG_CONFIG_HOME:-}" in
   /*) fish_completion_dir="$XDG_CONFIG_HOME/fish/completions" ;;
   *) fish_completion_dir="$HOME/.config/fish/completions" ;;
@@ -176,10 +177,6 @@ esac
 install_completion bash hami-cli "$bash_completion_dir"
 install_completion zsh _hami-cli "$zsh_completion_dir"
 install_completion fish hami-cli.fish "$fish_completion_dir"
-if [ "$completion_prefix" != "$HOME/.local" ]; then
-  install_completion bash hami-cli "$completion_prefix/share/bash-completion/completions"
-  install_completion zsh _hami-cli "$completion_prefix/share/zsh/site-functions"
-fi
 
 ensure_shell_config_file() {
   config_file=$1
@@ -277,7 +274,8 @@ append_bash_completion_config() {
     printf '%s\n' '          done'
     printf '%s\n' '          unset _hami_bash_completion'
     printf '%s\n' '        fi'
-    printf '%s\n' '        if declare -F _get_comp_words_by_ref >/dev/null 2>&1; then'
+    printf '%s\n' \
+      '        if [[ -r "$HOME/.local/share/bash-completion/completions/hami-cli" ]] && declare -F _get_comp_words_by_ref >/dev/null 2>&1; then'
     printf '%s\n' '          source "$HOME/.local/share/bash-completion/completions/hami-cli"'
     printf '%s\n' '        fi'
     printf '%s\n' '      fi'
@@ -304,8 +302,21 @@ configure_bash_completion() {
 
 default_shell=${SHELL:-}
 case "${default_shell##*/}" in
-  zsh) configure_zsh_completion "$default_shell" ;;
-  bash) configure_bash_completion ;;
+  zsh)
+    if [ "$install_dir" = "$default_install_dir" ]; then
+      configure_zsh_completion "$default_shell"
+    else
+      printf 'For Zsh, add %s to fpath and enable compinit if needed.\n' "$zsh_completion_dir"
+    fi
+    ;;
+  bash)
+    if [ "$install_dir" = "$default_install_dir" ]; then
+      configure_bash_completion
+    else
+      printf 'Bash completion is installed in %s; configure your shell to load it.\n' \
+        "$bash_completion_dir"
+    fi
+    ;;
   fish) printf 'Fish loads completion from %s automatically.\n' "$fish_completion_dir" ;;
   *) printf 'Completion files are installed; configure your shell to load them.\n' ;;
 esac
