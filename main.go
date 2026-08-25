@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,10 +38,17 @@ type commandOptions struct {
 	out          io.Writer
 	errOut       io.Writer
 	executable   string
+	stdinTTY     bool
+	kitupHome    string
+	kitupCWD     string
 }
 
 func main() {
-	options := &commandOptions{out: os.Stdout, errOut: os.Stderr}
+	options := &commandOptions{
+		out:      os.Stdout,
+		errOut:   os.Stderr,
+		stdinTTY: term.IsTerminal(int(os.Stdin.Fd())),
+	}
 	command := newRootCommand(options)
 	if err := command.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -68,6 +76,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		newBindCommand(options),
 		newUnbindCommand(options),
 		newApplyCommand(options),
+		newSkillCommand(options),
 		newVersionCommand(options),
 	)
 	command.InitDefaultCompletionCmd()
@@ -249,12 +258,20 @@ func newDeviceAssignCommand(options *commandOptions) *cobra.Command {
 }
 
 func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
-	var nodeName, deviceID string
+	var nodeName, deviceID, expectedUID, expectedPool string
 	command := &cobra.Command{
 		Use:   "unassign [DEVICE_NAME]",
 		Short: "Remove one physical GPU from its resource pool",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
+			hasExpectedUID := command.Flags().Changed("expected-uid")
+			hasExpectedPool := command.Flags().Changed("expected-pool")
+			if hasExpectedUID != hasExpectedPool {
+				return fmt.Errorf("--expected-uid and --expected-pool must be used together")
+			}
+			if hasExpectedUID && (expectedUID == "" || expectedPool == "") {
+				return fmt.Errorf("--expected-uid and --expected-pool must not be empty")
+			}
 			cli, err := options.getClient()
 			if err != nil {
 				return err
@@ -266,6 +283,12 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 			device := &resourcepoolv1alpha1.GPUDevice{}
 			if err := cli.Get(command.Context(), client.ObjectKey{Name: name}, device); err != nil {
 				return fmt.Errorf("get GPUDevice %q: %w", name, err)
+			}
+			if hasExpectedUID && string(device.UID) != expectedUID {
+				return fmt.Errorf("GPUDevice %q UID is %q, expected %q", name, device.UID, expectedUID)
+			}
+			if hasExpectedPool && gpuDevicePoolName(device) != expectedPool {
+				return fmt.Errorf("GPUDevice %q pool is %q, expected %q", name, gpuDevicePoolName(device), expectedPool)
 			}
 			base := device.DeepCopy()
 			device.Spec.PoolRef = nil
@@ -279,6 +302,8 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 	}
 	command.Flags().StringVar(&nodeName, "node", "", "Kubernetes Node name")
 	command.Flags().StringVar(&deviceID, "device-id", "", "Physical GPU UUID")
+	command.Flags().StringVar(&expectedUID, "expected-uid", "", "Require the current GPUDevice UID before unassigning")
+	command.Flags().StringVar(&expectedPool, "expected-pool", "", "Require the current ResourcePool name before unassigning")
 	return command
 }
 

@@ -60,6 +60,28 @@ GOPRIVATE=github.com/dynamia-ai/* GOWORK=off \
 
 将 `VERSION` 替换为已发布标签或其他可解析的 Go 模块版本。公开用户应使用预编译归档。
 
+### 安装 Agent Skill
+
+发布的 `hami-cli` 二进制内置与当前版本匹配的资源池管理 Skill。安装二进制后，运行以下命令，将 Skill 安装到本机已检测到的 Agent：
+
+```bash
+hami-cli skill install
+```
+
+非交互场景需要显式指定作用域和 Agent。例如，将 Skill 安装到 Codex 用户目录：
+
+```bash
+hami-cli skill install --scope user --agent codex --yes
+```
+
+Codex 用户作用域支持 `~/.agents/skills` 和兼容目录 `~/.codex/skills`。安装器优先复用已存在的兼容目录；两个目录都不存在时，使用 `~/.agents/skills`。项目作用域安装到当前项目的 `.agents/skills/managing-hami-resource-pools`：
+
+```bash
+hami-cli skill install --scope project --agent codex --yes
+```
+
+使用 `--dry-run` 可以在写入文件前查看安装计划。安装器会写入 `.kitup.json` 所有权元数据；目标目录存在但不属于 `hami-cli` 时，默认报告冲突，不覆盖已有内容。
+
 ## 连接集群
 
 使用资源池命令前，确认以下条件：
@@ -91,6 +113,7 @@ hami-cli binding list
 | `hami-cli binding list` | 查看命名空间与资源池的绑定关系 |
 | `hami-cli bind/unbind` | 授予或撤销命名空间对资源池的访问权 |
 | `hami-cli apply -f` | 从 YAML、JSON 或标准输入应用资源池对象 |
+| `hami-cli skill install` | 将二进制内置的资源池管理 Skill 安装到本地 Agent |
 | `hami-cli version` | 查看版本、源码 revision、资源池 API revision、构建时间和目标平台 |
 | `hami-cli completion` | 生成 Bash、Zsh、Fish 或 PowerShell 补全脚本 |
 
@@ -150,7 +173,17 @@ hami-cli device unassign \
   --device-id GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 ```
 
-设备归属更新带有资源版本前置条件。对象被其他客户端并发修改时，命令返回冲突，不会覆盖更新后的状态。删除资源池前，需要先移除设备归属和其他引用：
+在共享集群中清理临时设备归属时，同时指定操作前记录的设备 UID 和资源池名称：
+
+```bash
+hami-cli device unassign GPUDEVICE_NAME \
+  --expected-uid DEVICE_UID \
+  --expected-pool training
+```
+
+`--expected-uid` 和 `--expected-pool` 必须同时使用。当前 UID 或资源池名称不符合预期时，命令停止且不修改设备。设备归属更新还带有资源版本前置条件；对象在命令读取后被其他客户端并发修改时，命令返回冲突，不会覆盖更新后的状态。
+
+删除资源池前，需要先移除设备归属和其他引用：
 
 ```bash
 hami-cli pool delete training
@@ -262,16 +295,59 @@ docker run --rm ghcr.io/dynamia-ai/hami-cli:latest version
 需要访问集群时，只读挂载 kubeconfig，并使用宿主机 UID/GID 运行：
 
 ```bash
+HAMI_IMAGE=ghcr.io/dynamia-ai/hami-cli:latest
+HAMI_KUBECONFIG="$HOME/.kube/config"
+HAMI_CONTEXT=YOUR_CONTEXT
+
 docker run --rm \
   --user "$(id -u):$(id -g)" \
-  --volume "$HOME/.kube:/kube:ro" \
-  --env KUBECONFIG=/kube/config \
-  ghcr.io/dynamia-ai/hami-cli:latest pool list
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  pool list -o json
 ```
+
+如果所选 cluster 的 `server` 是 `https://127.0.0.1:PORT` 或 `https://localhost:PORT`，该地址在容器内指向容器自身。macOS 上的 Docker Desktop 和 OrbStack 可通过 `host.docker.internal` 访问宿主机。只替换连接地址，并保留证书原本验证的服务端名称：
+
+```bash
+HAMI_API_PORT=6443
+HAMI_TLS_SERVER_NAME=NAME_FROM_KUBECONFIG_OR_CERTIFICATE
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  --server "https://host.docker.internal:${HAMI_API_PORT}" \
+  --tls-server-name "$HAMI_TLS_SERVER_NAME" \
+  binding list --all-namespaces -o json
+```
+
+`HAMI_TLS_SERVER_NAME` 应取自 kubeconfig 中该 cluster 的 `tls-server-name`，或取证书 Subject Alternative Name 覆盖的原始服务端名称。不要用 `--insecure-skip-tls-verify` 代替正确的 TLS 身份。Linux Docker 需要显式映射宿主机网关时，可额外传入 `--add-host host.docker.internal:host-gateway`。
+
+容器中的二进制同样内置 Agent Skill。安装到 Codex 用户目录时，只向容器开放目标 `.agents` 目录，并提供可写的容器 `HOME`：
+
+```bash
+mkdir -p "$HOME/.agents"
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/hami-home \
+  --mount type=bind,src="$HOME/.agents",dst=/hami-home/.agents \
+  "$HAMI_IMAGE" \
+  skill install --scope user --agent codex --yes
+```
+
+安装 Skill 不需要 kubeconfig。使用宿主机 UID/GID 可避免安装文件归属容器用户；目标挂载必须可写，不能像集群查询时那样标记为 `readonly`。
 
 容器使用时注意以下限制：
 
 - kubeconfig 中的 API Server 必须能从容器网络访问。宿主机 `localhost` 不代表容器内的宿主机。
+- kubeconfig 如果引用外部 CA、客户端证书或密钥文件，还需将这些文件只读挂载到容器内，并确保 kubeconfig 中的路径在容器内有效。内嵌证书数据不需要单独挂载。
 - 当前 distroless 镜像不包含 `aws`、`gcloud`、`kubelogin` 等外部程序，不能直接执行 kubeconfig 的 `exec` 认证插件。
 - GHCR 标签可以被更新。稳定发布的 `image-digest.txt` 和 workflow run summary 会提供 `image@sha256:...` 不可变引用。
 
