@@ -3,7 +3,7 @@
 set -eu
 
 version="${HAMI_CLI_VERSION:-latest}"
-install_dir="${HAMI_CLI_INSTALL_DIR:-/usr/local/bin}"
+install_dir="${HAMI_CLI_INSTALL_DIR:-}"
 default_base_url="https://storage.dynamia.ai/hami-cli"
 default_fallback_base_url="https://public.hami.run/hami-cli"
 primary_base_url="${HAMI_CLI_BASE_URL:-$default_base_url}"
@@ -17,6 +17,17 @@ fail() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
+
+if [ -z "${HOME:-}" ]; then
+  fail "HOME is required"
+fi
+if [ -z "$install_dir" ]; then
+  install_dir="$HOME/.local/bin"
+fi
+case "$install_dir" in
+  /) ;;
+  */) install_dir=${install_dir%/} ;;
+esac
 
 case "$version" in
   '' | *[!a-z0-9._-]* | [._-]*) fail "invalid version: $version" ;;
@@ -115,26 +126,56 @@ binary="$work_dir/extracted/$archive_root/hami-cli"
 [ -f "$binary" ] || fail "archive does not contain the expected hami-cli binary"
 
 install_binary() {
-  if [ ! -d "$install_dir" ]; then
-    mkdir -p "$install_dir" 2>/dev/null || true
-  fi
-  if [ -d "$install_dir" ] && [ -w "$install_dir" ]; then
-    install -m 0755 "$binary" "$install_dir/hami-cli"
-    return
-  fi
-  if [ "$(id -u)" -eq 0 ]; then
-    install -m 0755 "$binary" "$install_dir/hami-cli"
-    return
-  fi
-  command -v sudo >/dev/null 2>&1 \
+  mkdir -p "$install_dir" \
+    || fail "cannot create $install_dir; set HAMI_CLI_INSTALL_DIR to a writable directory"
+  [ -w "$install_dir" ] \
     || fail "cannot write to $install_dir; set HAMI_CLI_INSTALL_DIR to a writable directory"
-  sudo mkdir -p "$install_dir"
-  sudo install -m 0755 "$binary" "$install_dir/hami-cli"
+  install -m 0755 "$binary" "$install_dir/hami-cli" \
+    || fail "could not install hami-cli to $install_dir"
 }
 
 install_binary
 installed_binary="$install_dir/hami-cli"
 printf 'Installed hami-cli to %s\n' "$installed_binary"
+case ":${PATH:-}:" in
+  *:"$install_dir":*) ;;
+  *) printf 'Add %s to PATH before using hami-cli from a new shell.\n' "$install_dir" ;;
+esac
+
+completion_prefix=${install_dir%/}
+case "$completion_prefix" in
+  */bin) completion_prefix=${completion_prefix%/bin} ;;
+esac
+
+install_completion() {
+  shell=$1
+  filename=$2
+  completion_dir=$3
+  generated_completion="$work_dir/$filename"
+  completion_path="$completion_dir/$filename"
+
+  "$installed_binary" completion "$shell" > "$generated_completion" \
+    || fail "could not generate $shell completion"
+
+  mkdir -p "$completion_dir" \
+    || fail "cannot create $completion_dir; install $shell completion manually"
+  [ -w "$completion_dir" ] \
+    || fail "cannot write to $completion_dir; install $shell completion manually"
+  install -m 0644 "$generated_completion" "$completion_path" \
+    || fail "could not install $shell completion to $completion_dir"
+  printf 'Installed %s completion to %s\n' "$shell" "$completion_path"
+}
+
+bash_completion_dir="$completion_prefix/share/bash-completion/completions"
+zsh_completion_dir="$completion_prefix/share/zsh/site-functions"
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fish_completion_dir="$XDG_CONFIG_HOME/fish/completions" ;;
+  *) fish_completion_dir="$HOME/.config/fish/completions" ;;
+esac
+install_completion bash hami-cli "$bash_completion_dir"
+install_completion zsh _hami-cli "$zsh_completion_dir"
+install_completion fish hami-cli.fish "$fish_completion_dir"
+printf 'For Zsh, add %s to fpath and enable compinit if needed.\n' "$zsh_completion_dir"
 
 set -- skill install --scope user --yes
 if [ -n "${HAMI_CLI_AGENT:-}" ]; then
@@ -145,4 +186,4 @@ if ! "$installed_binary" "$@"; then
 fi
 
 "$installed_binary" version
-printf 'hami-cli and its bundled Skill are ready.\n'
+printf 'hami-cli, shell completion files, and its bundled Skill are ready.\n'
