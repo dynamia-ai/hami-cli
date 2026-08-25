@@ -225,19 +225,17 @@ jobs:
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public artifacts
+      - name: Verify public artifacts from OSS
         shell: bash
-        run: |
-          set -euo pipefail
-          for configured_base_url in "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL"; do
-            base_url="${configured_base_url%/}"
-            [[ "$base_url" = https://* ]]
-            for file in dist/*.tar.gz dist/*.tar.gz.sha256 dist/image-digest.txt; do
-              curl --retry 8 --retry-all-errors -fsSLo "$RUNNER_TEMP/${file##*/}" \
-                "$base_url/$GITHUB_REF_NAME/${file##*/}"
-              cmp "$file" "$RUNNER_TEMP/${file##*/}"
-            done
-          done
+        run: >-
+          bash hack/verify-public-artifacts.sh "$GITHUB_REF_NAME" dist
+          "aliyun-oss=$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+
+      - name: Verify public artifacts from S3
+        shell: bash
+        run: >-
+          bash hack/verify-public-artifacts.sh "$GITHUB_REF_NAME" dist
+          "s3=$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
       - name: Create authenticated GitHub Release mirror
         env:
