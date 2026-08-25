@@ -21,6 +21,7 @@ curl -fsSL https://public.hami.run/hami-cli/install.sh | sh
 - hami-cli 内置的 Agent Skill
 
 安装过程不需要 `root` 权限，也不会调用 `sudo`。
+安装脚本会为当前默认 shell 启用补全；重新打开 shell 后生效。Bash 需要已经安装 `bash-completion`。
 
 如果新 shell 找不到 `hami-cli`，将 `~/.local/bin` 加入 `PATH`：
 
