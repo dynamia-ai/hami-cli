@@ -295,16 +295,59 @@ docker run --rm ghcr.io/dynamia-ai/hami-cli:latest version
 需要访问集群时，只读挂载 kubeconfig，并使用宿主机 UID/GID 运行：
 
 ```bash
+HAMI_IMAGE=ghcr.io/dynamia-ai/hami-cli:latest
+HAMI_KUBECONFIG="$HOME/.kube/config"
+HAMI_CONTEXT=YOUR_CONTEXT
+
 docker run --rm \
   --user "$(id -u):$(id -g)" \
-  --volume "$HOME/.kube:/kube:ro" \
-  --env KUBECONFIG=/kube/config \
-  ghcr.io/dynamia-ai/hami-cli:latest pool list
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  pool list -o json
 ```
+
+如果所选 cluster 的 `server` 是 `https://127.0.0.1:PORT` 或 `https://localhost:PORT`，该地址在容器内指向容器自身。macOS 上的 Docker Desktop 和 OrbStack 可通过 `host.docker.internal` 访问宿主机。只替换连接地址，并保留证书原本验证的服务端名称：
+
+```bash
+HAMI_API_PORT=6443
+HAMI_TLS_SERVER_NAME=NAME_FROM_KUBECONFIG_OR_CERTIFICATE
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  --server "https://host.docker.internal:${HAMI_API_PORT}" \
+  --tls-server-name "$HAMI_TLS_SERVER_NAME" \
+  binding list --all-namespaces -o json
+```
+
+`HAMI_TLS_SERVER_NAME` 应取自 kubeconfig 中该 cluster 的 `tls-server-name`，或取证书 Subject Alternative Name 覆盖的原始服务端名称。不要用 `--insecure-skip-tls-verify` 代替正确的 TLS 身份。Linux Docker 需要显式映射宿主机网关时，可额外传入 `--add-host host.docker.internal:host-gateway`。
+
+容器中的二进制同样内置 Agent Skill。安装到 Codex 用户目录时，只向容器开放目标 `.agents` 目录，并提供可写的容器 `HOME`：
+
+```bash
+mkdir -p "$HOME/.agents"
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/hami-home \
+  --mount type=bind,src="$HOME/.agents",dst=/hami-home/.agents \
+  "$HAMI_IMAGE" \
+  skill install --scope user --agent codex --yes
+```
+
+安装 Skill 不需要 kubeconfig。使用宿主机 UID/GID 可避免安装文件归属容器用户；目标挂载必须可写，不能像集群查询时那样标记为 `readonly`。
 
 容器使用时注意以下限制：
 
 - kubeconfig 中的 API Server 必须能从容器网络访问。宿主机 `localhost` 不代表容器内的宿主机。
+- kubeconfig 如果引用外部 CA、客户端证书或密钥文件，还需将这些文件只读挂载到容器内，并确保 kubeconfig 中的路径在容器内有效。内嵌证书数据不需要单独挂载。
 - 当前 distroless 镜像不包含 `aws`、`gcloud`、`kubelogin` 等外部程序，不能直接执行 kubeconfig 的 `exec` 认证插件。
 - GHCR 标签可以被更新。稳定发布的 `image-digest.txt` 和 workflow run summary 会提供 `image@sha256:...` 不可变引用。
 

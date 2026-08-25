@@ -25,6 +25,62 @@ Record at least these stable baseline mappings:
 
 Ignore `resourceVersion`, timestamps, and controller status when comparing whether unrelated desired state changed.
 
+## Run from a container image
+
+When the CLI is delivered as a container image, remember that the image entrypoint is already `hami-cli`. Mount the kubeconfig read-only, keep the target context explicit, and do not expose unrelated host directories:
+
+```bash
+HAMI_IMAGE=IMAGE_REFERENCE
+HAMI_KUBECONFIG=/absolute/path/to/kubeconfig
+HAMI_CONTEXT=TARGET_CONTEXT
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  pool list -o json
+```
+
+If the selected cluster server uses `127.0.0.1` or `localhost`, it points to the container itself. Replace only the network endpoint with the host gateway that the container runtime provides. On macOS with Docker Desktop or OrbStack, the generic form is:
+
+```bash
+HAMI_API_PORT=6443
+HAMI_TLS_SERVER_NAME=NAME_FROM_KUBECONFIG_OR_CERTIFICATE
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$HAMI_KUBECONFIG",dst=/kubeconfig,readonly \
+  "$HAMI_IMAGE" \
+  --kubeconfig /kubeconfig \
+  --context "$HAMI_CONTEXT" \
+  --request-timeout 20s \
+  --server "https://host.docker.internal:${HAMI_API_PORT}" \
+  --tls-server-name "$HAMI_TLS_SERVER_NAME" \
+  binding list --all-namespaces -o json
+```
+
+Take `HAMI_TLS_SERVER_NAME` from the selected kubeconfig cluster's `tls-server-name`, or from the original name covered by the certificate's Subject Alternative Names. Never replace correct server identity with `--insecure-skip-tls-verify`. Linux Docker may additionally require `--add-host host.docker.internal:host-gateway`.
+
+If kubeconfig refers to external CA, client-certificate, or key files, mount each required file read-only and preserve a path that is valid inside the container. Embedded certificate data needs no extra mount. A distroless image cannot run external kubeconfig `exec` authentication plugins; use a self-contained credential supported by the environment or run the binary on the host.
+
+The image also bundles this skill. Install it without mounting kubeconfig, and expose only a writable skill destination:
+
+```bash
+mkdir -p "$HOME/.agents"
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/hami-home \
+  --mount type=bind,src="$HOME/.agents",dst=/hami-home/.agents \
+  "$HAMI_IMAGE" \
+  skill install --scope user --agent codex --yes
+```
+
+The writable `HOME` and matching UID/GID keep installed files owned by the host user. Do not mark the skill destination mount read-only.
+
 ## Audit relationships
 
 List every namespace-to-pool relationship:
