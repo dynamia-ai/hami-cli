@@ -12,6 +12,8 @@
 
 稳定版标签必须符合语义化版本格式，且标签提交必须已经进入 `main`。分支版输入必须是仓库中已有的远端分支。工作流会将分支名转换为小写安全字符；原名称包含 `/`、大写字符、其他不安全字符或长度超过限制时，版本末尾会附加短哈希。
 
+`latest` 和手动滚动发布使用不同的固定并发组。所有手动滚动发布会跨分支串行执行，避免将未经截断的分支名写入 GitHub Actions 并发组，也避免不同运行的多渠道分发相互穿插。
+
 手动发布指定分支：
 
 ```bash
@@ -43,7 +45,9 @@ GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` �
 
 两个发布工作流均设置 `DOCKER_BUILD_RECORD_UPLOAD: "false"`。`docker/build-push-action` 继续生成 Docker build summary，但不上传 `.dockerbuild` Actions artifact。
 
-滚动版仍使用显式创建的 `release-binaries-<version>` Actions artifact 在 build 和 publish job 之间传递制品。发布成功后立即删除，发布失败时最多保留 1 天用于诊断。该 Actions artifact 不是公开分发端点。稳定版不上传发布载荷 Actions artifact。
+两个发布工作流都只构建一次，再通过临时 Actions artifacts 将制品传给各分发 job：`release-binaries-<version>` 包含平台归档、校验文件以及稳定版的 `image-digest.txt`，`release-image-<version>` 包含 OCI 镜像归档。二进制 artifact 只由 OSS、S3、GitHub Release 和 Summary 的相关 job 下载，镜像 artifact 只由 GHCR job 下载，避免各渠道重复构建或传递不需要的大文件。
+
+分发前置 job 会先集中检查所有渠道的凭据和公开下载地址，配置不完整时不会启动任一发布操作。OSS、S3、GHCR 分发随后并行执行，稳定版还会并行创建 GitHub Release 副本。只有所有渠道均发布并校验成功后，Summary job 才会写入成功摘要。Cleanup job 使用 `always()` 等待所有 artifact 消费者结束，因此任一分发 job 失败时仍会删除两个临时 artifacts。两者的保留期仍设置为 1 天，仅作为 workflow 被外部取消或 GitHub artifact 删除 API 不可用时的兜底；Actions artifact 不是公开分发端点。
 
 发布成功后，workflow run summary 会列出：
 

@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Keep the key bounded and serialize manual multi-channel publications across branches.
+  group: rolling-release-${{ github.event_name }}
+  cancel-in-progress: false
+
 env:
   BUILDX_VERSION: v0.36.1
   BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
@@ -38,7 +43,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
       image-digest: ${{ steps.image-archive.outputs.digest }}
-      artifact-id: ${{ steps.actions-artifact.outputs.artifact-id }}
+      binary-artifact-id: ${{ steps.binary-artifact.outputs.artifact-id }}
+      image-artifact-id: ${{ steps.image-artifact.outputs.artifact-id }}
     steps:
       - name: Require main workflow for manual publication
         if: github.event_name == 'workflow_dispatch'
@@ -123,7 +129,7 @@ jobs:
         run: make ci
 
       - name: Build snapshot artifacts with GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
           distribution: goreleaser
           version: ${{ env.GORELEASER_VERSION }}
@@ -145,16 +151,16 @@ jobs:
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@v4.3.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Build mutable image archive
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: ${{ runner.temp }}/release-image
           file: ${{ runner.temp }}/release-image/Dockerfile
@@ -176,11 +182,10 @@ jobs:
           digest="$(tar -xOf "$RUNNER_TEMP/hami-cli-image.tar" index.json \
             | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          cp "$RUNNER_TEMP/hami-cli-image.tar" dist/hami-cli-image.tar
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Upload rolling release payload
-        id: actions-artifact
+      - name: Upload rolling binary payload
+        id: binary-artifact
         uses: actions/upload-artifact@v7
         with:
           name: release-binaries-${{ steps.release.outputs.version }}
@@ -188,22 +193,27 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sha256
             dist/install-*.sh
-            dist/hami-cli-image.tar
           if-no-files-found: error
+          compression-level: 0
           retention-days: 1
 
-  publish:
-    name: Publish rolling release
+      - name: Upload rolling image payload
+        id: image-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-image-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/hami-cli-image.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  validate_distribution:
+    name: Validate rolling distribution configuration
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: rolling-release-${{ needs.build.outputs.version }}
-      cancel-in-progress: false
+    timeout-minutes: 5
     permissions:
-      actions: write
       contents: read
-      packages: write
     steps:
       - name: Checkout trusted release tooling
         uses: actions/checkout@v7
@@ -213,14 +223,13 @@ jobs:
           persist-credentials: false
 
       - name: Download rolling release payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.1
         with:
           name: release-binaries-${{ needs.build.outputs.version }}
           path: dist
 
       - name: Validate trusted tooling and payload
         env:
-          EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
           EXPECTED_REVISION: ${{ needs.build.outputs.revision }}
           VERSION: ${{ needs.build.outputs.version }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -229,9 +238,6 @@ jobs:
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
           [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$VERSION" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
-          digest="$(tar -xOf dist/hami-cli-image.tar index.json \
-            | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
-          test "$digest" = "$EXPECTED_DIGEST"
           bash release-control/hack/verify-release-archives.sh dist
           if [[ "$VERSION" = latest ]]; then
             trusted_installers="$(mktemp -d)"
@@ -245,7 +251,7 @@ jobs:
             test ! -e dist/install-r2.sh
           fi
 
-      - name: Validate publication credentials
+      - name: Validate publication credentials and endpoints
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
@@ -271,6 +277,34 @@ jobs:
           test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
           test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
+  publish_oss:
+    name: Publish rolling binaries to OSS
+    needs: [build, validate_distribution]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted release tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+
+      - name: Download rolling binary payload
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: release-binaries-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Validate trusted tooling and binary payload
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
+          bash release-control/hack/verify-release-archives.sh dist
+
       - name: Install ossutil
         shell: bash
         run: |
@@ -294,6 +328,43 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: bash release-control/hack/publish-oss.sh mutable "$VERSION" dist
 
+      - name: Verify public artifacts from OSS
+        shell: bash
+        env:
+          PUBLIC_INSTALLER_ARTIFACT: install-oss.sh
+          VERSION: ${{ needs.build.outputs.version }}
+        run: >-
+          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
+          "aliyun-oss=$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+
+  publish_s3:
+    name: Publish rolling binaries to S3
+    needs: [build, validate_distribution]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted release tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+
+      - name: Download rolling binary payload
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: release-binaries-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Validate trusted tooling and binary payload
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
+          bash release-control/hack/verify-release-archives.sh dist
+
       - name: Verify AWS CLI
         run: |
           aws --version
@@ -309,19 +380,52 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: bash release-control/hack/publish-s3.sh mutable "$VERSION" dist
 
+      - name: Verify public artifacts from S3
+        shell: bash
+        env:
+          PUBLIC_INSTALLER_ARTIFACT: install-r2.sh
+          VERSION: ${{ needs.build.outputs.version }}
+        run: >-
+          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
+          "s3=$S3_PUBLIC_DOWNLOAD_BASE_URL"
+
+  publish_ghcr:
+    name: Publish rolling image to GHCR
+    needs: [build, validate_distribution]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download rolling image payload
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: release-image-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Validate image payload
+        env:
+          EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          digest="$(tar -xOf dist/hami-cli-image.tar index.json \
+            | jq -r '.manifests | if length == 1 then .[0].digest else error("unexpected manifest count") end')"
+          test "$digest" = "$EXPECTED_DIGEST"
+
       - name: Install skopeo
         run: |
           sudo apt-get update
           sudo apt-get install -y skopeo
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@v4.3.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -336,7 +440,6 @@ jobs:
             "docker://$IMAGE:$VERSION"
 
       - name: Resolve and verify image digest
-        id: image
         shell: bash
         env:
           EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
@@ -354,42 +457,67 @@ jobs:
             test "$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' <<< "$metadata")" = "$EXPECTED_REVISION"
             test "$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$metadata")" = "$VERSION"
           done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public artifacts from OSS
-        shell: bash
-        env:
-          PUBLIC_INSTALLER_ARTIFACT: install-oss.sh
-          VERSION: ${{ needs.build.outputs.version }}
-        run: >-
-          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
-          "aliyun-oss=$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
+  summarize:
+    name: Summarize rolling release
+    needs: [build, publish_oss, publish_s3, publish_ghcr]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted release tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
 
-      - name: Verify public artifacts from S3
-        shell: bash
-        env:
-          PUBLIC_INSTALLER_ARTIFACT: install-r2.sh
-          VERSION: ${{ needs.build.outputs.version }}
-        run: >-
-          bash release-control/hack/verify-public-artifacts.sh "$VERSION" dist
-          "s3=$S3_PUBLIC_DOWNLOAD_BASE_URL"
+      - name: Download rolling binary payload
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: release-binaries-${{ needs.build.outputs.version }}
+          path: dist
 
       - name: Write published artifact summary
         env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
           VERSION: ${{ needs.build.outputs.version }}
         run: >-
           bash release-control/hack/write-release-summary.sh
           "$VERSION" dist "$IMAGE" "$IMAGE_DIGEST"
 
-      - name: Delete rolling release payload
-        if: success()
+  cleanup:
+    name: Delete rolling release payloads
+    if: >-
+      ${{ always() &&
+          (needs.build.outputs.binary-artifact-id != '' ||
+           needs.build.outputs.image-artifact-id != '') }}
+    needs: [build, publish_oss, publish_s3, publish_ghcr, summarize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete temporary Actions artifacts
         shell: bash
         env:
-          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+          ARTIFACT_IDS: >-
+            ${{ needs.build.outputs.binary-artifact-id }}
+            ${{ needs.build.outputs.image-artifact-id }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
-          gh api --method DELETE \
-            "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
+          cleanup_failed=false
+          for artifact_id in $ARTIFACT_IDS; do
+            if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
+              echo "invalid artifact id: $artifact_id" >&2
+              cleanup_failed=true
+              continue
+            fi
+            if ! gh api --method DELETE \
+              "/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"; then
+              cleanup_failed=true
+            fi
+          done
+          test "$cleanup_failed" = false
