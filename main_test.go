@@ -737,7 +737,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 	cpuQuota := apiresource.MustParse("128")
 	memoryQuota := apiresource.MustParse("512Gi")
 	pool := &resourcepoolv1alpha1.ResourcePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "training-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", Generation: 7},
 		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
 			Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpuQuota, Memory: &memoryQuota},
 			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
@@ -752,6 +752,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 			HealthyDevices:    1,
 			Revision:          "inventory-7",
 			Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{
+				ObservedGeneration: 7,
 				Used: resourcepoolv1alpha1.ResourcePoolResourceUsage{
 					CPU: apiresource.MustParse("32"), Memory: apiresource.MustParse("96Gi"),
 				},
@@ -821,6 +822,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 		"Name:                   training-a\n" +
 		"CPU quota:              128\n" +
 		"Memory quota:           512Gi\n" +
+		"Quota ledger:           current (generation 7)\n" +
 		"CPU used:               32\n" +
 		"CPU reserved:           4\n" +
 		"Memory used:            96Gi\n" +
@@ -865,8 +867,44 @@ func TestPoolDescribeShowsEmptyAssociations(t *testing.T) {
 	if !strings.Contains(output.String(), "CPU quota:              <unlimited>\nMemory quota:           <unlimited>\n") {
 		t.Fatalf("pool describe empty quota output = %q, want unlimited CPU and memory", output.String())
 	}
+	if strings.Contains(output.String(), "Quota ledger:") {
+		t.Fatalf("pool describe unconfigured quota output = %q, want no quota ledger state", output.String())
+	}
 	if got, want := output.String(), "Namespaces:\n  <none>\n\nDevices:\n  <none>\n"; !strings.Contains(got, want) {
 		t.Fatalf("pool describe empty associations = %q, want suffix %q", got, want)
+	}
+
+	cpuQuota := apiresource.MustParse("4")
+	pool.Generation = 4
+	pool.Spec.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpuQuota}
+	pool.Status.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 3}
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe stale quota ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           stale (observed generation 3, current generation 4)\n") {
+		t.Fatalf("pool describe stale quota ledger output = %q", output.String())
+	}
+
+	pool.Status.Quota = nil
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe pending quota ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           pending (current generation 4)\n") {
+		t.Fatalf("pool describe pending quota ledger output = %q", output.String())
 	}
 }
 

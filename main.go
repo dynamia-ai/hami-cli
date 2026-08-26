@@ -432,6 +432,9 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 	fmt.Fprintf(writer, "Name:\t%s\n", pool.Name)
 	fmt.Fprintf(writer, "CPU quota:\t%s\n", cpuQuota)
 	fmt.Fprintf(writer, "Memory quota:\t%s\n", memoryQuota)
+	if ledger := quotaLedgerState(pool); ledger != "" {
+		fmt.Fprintf(writer, "Quota ledger:\t%s\n", ledger)
+	}
 	if pool.Status.Quota != nil {
 		fmt.Fprintf(writer, "CPU used:\t%s\n", pool.Status.Quota.Used.CPU.String())
 		fmt.Fprintf(writer, "CPU reserved:\t%s\n", pool.Status.Quota.Reserved.CPU.String())
@@ -474,6 +477,20 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 		fmt.Fprintf(writer, "  %s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Status.Discovered, device.Status.Healthy)
 	}
 	return writer.Flush()
+}
+
+func quotaLedgerState(pool *resourcepoolv1alpha1.ResourcePool) string {
+	if pool.Spec.Quota == nil {
+		return ""
+	}
+	if pool.Status.Quota == nil {
+		return fmt.Sprintf("pending (current generation %d)", pool.Generation)
+	}
+	observed := pool.Status.Quota.ObservedGeneration
+	if observed == pool.Generation {
+		return fmt.Sprintf("current (generation %d)", observed)
+	}
+	return fmt.Sprintf("stale (observed generation %d, current generation %d)", observed, pool.Generation)
 }
 
 func newPoolDeleteCommand(options *commandOptions) *cobra.Command {

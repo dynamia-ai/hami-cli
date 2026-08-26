@@ -207,9 +207,21 @@ other:
 ```
 
 `pool describe` reports the configured ceilings and the manager-owned used and
-reserved ledger when status is available. The CLI never writes `status.quota`.
+reserved ledger when status is available. Trust those values only when the
+description reports `Quota ledger: current`; a pending or stale ledger has not
+observed the ResourcePool's current generation, and quota admission fails
+closed until it does. The CLI never writes `status.quota`.
+
+Enabling quota can be rejected while Pod admissions are in flight. Re-read the
+pool and retry only after those admissions settle instead of bypassing the
+transition barrier.
 
 Before `pool create`, require the name to be absent. For a temporary lifecycle, exclude other writers for that pool name from the absence check through confirmed deletion. After a successful create, read and record the pool UID. An `AlreadyExists` or ambiguous create result does not establish ownership; do not later delete that pool without independent proof.
+
+The API also rejects recreating a pool name while a non-terminal Pod still
+refers to an earlier pool with that name. Use a new pool name or wait for those
+Pods to terminate; do not remove manager-owned Pod membership metadata to force
+recreation.
 
 The pool UID re-read is not an atomic delete precondition for plain `pool delete`, which deletes by name. If another actor can replace the pool before the UID is recorded or between the final read and delete, do not automate temporary cleanup. The `--force` mode described below adds UID guards, but it is intended for destructive pool teardown rather than ownership-safe reversal of a temporary test.
 
