@@ -83,6 +83,15 @@ The writable `HOME` and matching UID/GID keep installed files owned by the host 
 
 ## Audit relationships
 
+Start a human investigation from the pool and drill down to its associated namespaces and devices:
+
+```bash
+HAMI_POOL=training
+"${HAMI[@]}" pool describe "$HAMI_POOL"
+```
+
+`pool describe` matches associations by `spec.poolRef.name` across all namespaces. It is a human-readable convenience view; retain the structured list commands from the baseline when the result is audit evidence or input to automation.
+
 List every namespace-to-pool relationship:
 
 ```bash

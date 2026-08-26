@@ -18,7 +18,7 @@ Use this skill for audits, namespace access, pool lifecycle, GPU ownership, clea
 ## Operating pattern
 
 1. Run `hami-cli version` and relevant `--help` output. Use the selected `--context` and a bounded `--request-timeout` on every cluster call.
-2. Capture `pool list -o json`, `device list -o json`, and `binding list -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
+2. Use `pool describe NAME` for a human-readable view of one pool and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `binding list -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
 3. Choose the ownership mode:
    - Audit: read only.
    - User-owned desired state: use `apply` so an identical manifest is rerunnable.
