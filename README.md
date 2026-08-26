@@ -23,6 +23,8 @@ curl -fsSL https://public.hami.run/hami-cli/install.sh | sh
 安装过程不需要 `root` 权限，也不会调用 `sudo`。
 安装脚本会为当前默认 shell 启用补全；重新打开 shell 后生效。Bash 需要已经安装 `bash-completion`。
 
+Warp 的内置输入编辑器可能与 Zsh 补全不兼容。如果新建 Warp 窗口后补全不可用，运行 `exec /bin/zsh -l` 进入 Zsh login shell。
+
 如果新 shell 找不到 `hami-cli`，将 `~/.local/bin` 加入 `PATH`：
 
 ```bash
