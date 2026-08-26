@@ -480,10 +480,10 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 }
 
 func quotaLedgerState(pool *resourcepoolv1alpha1.ResourcePool) string {
-	if pool.Spec.Quota == nil {
-		return ""
-	}
 	if pool.Status.Quota == nil {
+		if pool.Spec.Quota == nil {
+			return ""
+		}
 		return fmt.Sprintf("pending (current generation %d)", pool.Generation)
 	}
 	observed := pool.Status.Quota.ObservedGeneration

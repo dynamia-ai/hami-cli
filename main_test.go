@@ -906,6 +906,31 @@ func TestPoolDescribeShowsEmptyAssociations(t *testing.T) {
 	if !strings.Contains(output.String(), "Quota ledger:           pending (current generation 4)\n") {
 		t.Fatalf("pool describe pending quota ledger output = %q", output.String())
 	}
+
+	pool.Generation = 5
+	pool.Spec.Quota = nil
+	pool.Status.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaStatus{
+		ObservedGeneration: 4,
+		Used: resourcepoolv1alpha1.ResourcePoolResourceUsage{
+			CPU: apiresource.MustParse("2"),
+		},
+	}
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe removed quota with stale ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           stale (observed generation 4, current generation 5)\n") {
+		t.Fatalf("pool describe removed quota with stale ledger output = %q", output.String())
+	}
+	if !strings.Contains(output.String(), "CPU used:               2\n") {
+		t.Fatalf("pool describe removed quota usage output = %q", output.String())
+	}
 }
 
 func TestPoolDeleteForceRemovesOnlyTargetPoolReferences(t *testing.T) {
