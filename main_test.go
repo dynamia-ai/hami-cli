@@ -321,6 +321,665 @@ func TestPoolListNameOutput(t *testing.T) {
 	}
 }
 
+func TestPoolDeleteForceRemovesOnlyTargetPoolReferences(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	targetPool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("share-gpu-uid")}}
+	otherPool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "other-pool"}}
+	targetDeviceA := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1", Labels: map[string]string{"keep": "me"}},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: targetPool.Name},
+		},
+	}
+	targetDeviceA.Labels = resourcepoolv1alpha1.PoolLabels(targetDeviceA)
+	targetDeviceB := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-b", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-b", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-B"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: targetPool.Name},
+		},
+	}
+	targetDeviceB.Labels = resourcepoolv1alpha1.PoolLabels(targetDeviceB)
+	otherDevice := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-c", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-c", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-C"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: otherPool.Name},
+		},
+	}
+	otherDevice.Labels = resourcepoolv1alpha1.PoolLabels(otherDevice)
+	targetBindingA := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: targetPool.Name, Namespace: "team-a", UID: types.UID("binding-a-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: targetPool.Name}},
+	}
+	targetBindingB := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: targetPool.Name, Namespace: "cert-manager", UID: types.UID("binding-b-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: targetPool.Name}},
+	}
+	otherBinding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: otherPool.Name, Namespace: "team-a"},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: otherPool.Name}},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		targetPool,
+		otherPool,
+		targetDeviceA,
+		targetDeviceB,
+		otherDevice,
+		targetBindingA,
+		targetBindingB,
+		otherBinding,
+	).Build()
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "delete", targetPool.Name, "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("forced pool delete error = %v, output = %q", err, output.String())
+	}
+
+	if err := cli.Get(t.Context(), client.ObjectKey{Name: targetPool.Name}, &resourcepoolv1alpha1.ResourcePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get deleted pool error = %v, want NotFound", err)
+	}
+	for _, binding := range []*resourcepoolv1alpha1.ResourcePoolBinding{targetBindingA, targetBindingB} {
+		key := client.ObjectKeyFromObject(binding)
+		if err := cli.Get(t.Context(), key, &resourcepoolv1alpha1.ResourcePoolBinding{}); !apierrors.IsNotFound(err) {
+			t.Errorf("get deleted binding %s error = %v, want NotFound", key, err)
+		}
+	}
+	for _, device := range []*resourcepoolv1alpha1.GPUDevice{targetDeviceA, targetDeviceB} {
+		stored := &resourcepoolv1alpha1.GPUDevice{}
+		if err := cli.Get(t.Context(), client.ObjectKeyFromObject(device), stored); err != nil {
+			t.Fatalf("get unassigned device %s: %v", device.Name, err)
+		}
+		if stored.Spec.PoolRef != nil {
+			t.Errorf("device %s pool = %#v, want unassigned", device.Name, stored.Spec.PoolRef)
+		}
+		if _, found := stored.Labels[resourcepoolv1alpha1.PoolLabel]; found {
+			t.Errorf("device %s retained pool label: %#v", device.Name, stored.Labels)
+		}
+	}
+	storedDeviceA := &resourcepoolv1alpha1.GPUDevice{}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(targetDeviceA), storedDeviceA); err != nil {
+		t.Fatal(err)
+	}
+	if storedDeviceA.Labels["keep"] != "me" {
+		t.Errorf("unassign removed unrelated label: %#v", storedDeviceA.Labels)
+	}
+	storedOtherDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(otherDevice), storedOtherDevice); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpuDevicePoolName(storedOtherDevice); got != otherPool.Name {
+		t.Errorf("other device pool = %q, want %q", got, otherPool.Name)
+	}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(otherBinding), &resourcepoolv1alpha1.ResourcePoolBinding{}); err != nil {
+		t.Errorf("other binding changed: %v", err)
+	}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(otherPool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("other pool changed: %v", err)
+	}
+
+	wantOutput := "resourcepoolbinding.resource.hami.io/share-gpu deleted from namespace cert-manager\n" +
+		"resourcepoolbinding.resource.hami.io/share-gpu deleted from namespace team-a\n" +
+		"gpudevice.resource.hami.io/device-a unassigned\n" +
+		"gpudevice.resource.hami.io/device-b unassigned\n" +
+		"resourcepool.resource.hami.io/share-gpu deleted\n"
+	if output.String() != wantOutput {
+		t.Errorf("forced pool delete output = %q, want %q", output.String(), wantOutput)
+	}
+}
+
+func TestPoolDeleteForceAcceptsPoolDisappearingBeforeFinalDelete(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			if _, ok := object.(*resourcepoolv1alpha1.ResourcePool); !ok {
+				return delegated.Delete(ctx, object, opts...)
+			}
+			if err := delegated.Delete(ctx, object, opts...); err != nil {
+				return err
+			}
+			return apierrors.NewNotFound(
+				schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "resourcepools"},
+				object.GetName(),
+			)
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("forced pool delete error = %v, output = %q", err, output.String())
+	}
+
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get concurrently deleted pool error = %v, want NotFound", err)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get deleted binding error = %v, want NotFound", err)
+	}
+}
+
+func TestPoolDeleteForceRejectsPoolDisappearanceWithReferences(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding).Build()
+	poolGets := 0
+	deleteCalls := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if _, ok := object.(*resourcepoolv1alpha1.ResourcePool); ok {
+				poolGets++
+				if poolGets == 2 {
+					return apierrors.NewNotFound(
+						schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "resourcepools"},
+						key.Name,
+					)
+				}
+			}
+			return delegated.Get(ctx, key, object, opts...)
+		},
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			deleteCalls++
+			return delegated.Delete(ctx, object, opts...)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "re-read ResourcePool") || !apierrors.IsNotFound(err) {
+		t.Fatalf("forced pool delete error = %v, want re-read NotFound", err)
+	}
+	if deleteCalls != 0 {
+		t.Errorf("delete calls = %d, want 0", deleteCalls)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); err != nil {
+		t.Errorf("binding changed after contradictory pool disappearance: %v", err)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("pool changed after contradictory pool disappearance: %v", err)
+	}
+}
+
+func TestPoolDeleteForceAcceptsListedDeviceDisappearing(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, device).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := object.(*resourcepoolv1alpha1.GPUDevice); !ok {
+				return delegated.Patch(ctx, object, patch, opts...)
+			}
+			if err := delegated.Delete(ctx, object); err != nil {
+				return err
+			}
+			return apierrors.NewNotFound(
+				schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "gpudevices"},
+				object.GetName(),
+			)
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("forced pool delete error = %v, output = %q", err, output.String())
+	}
+	if !strings.Contains(output.String(), "gpudevice.resource.hami.io/device-a already absent") {
+		t.Errorf("forced pool delete output = %q, want already-absent device status", output.String())
+	}
+
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(device), &resourcepoolv1alpha1.GPUDevice{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get concurrently deleted device error = %v, want NotFound", err)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get deleted pool error = %v, want NotFound", err)
+	}
+}
+
+func TestPoolDeleteForceStopsOnDeviceConflict(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, device).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(_ context.Context, _ client.WithWatch, object client.Object, _ client.Patch, _ ...client.PatchOption) error {
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "gpudevices"},
+				object.GetName(),
+				fmt.Errorf("concurrent assignment"),
+			)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !apierrors.IsConflict(err) || !strings.Contains(err.Error(), `unassign GPUDevice "device-a"`) {
+		t.Fatalf("forced pool delete error = %v, want GPUDevice conflict", err)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("pool changed after device conflict: %v", err)
+	}
+	storedDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(device), storedDevice); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpuDevicePoolName(storedDevice); got != pool.Name {
+		t.Errorf("device pool = %q after conflict, want %q", got, pool.Name)
+	}
+}
+
+func TestPoolDeleteForceCleansReferenceAddedDuringCleanup(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	deviceA := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	deviceA.Labels = resourcepoolv1alpha1.PoolLabels(deviceA)
+	deviceB := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-b"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-b", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-B"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	deviceB.Labels = resourcepoolv1alpha1.PoolLabels(deviceB)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, deviceA).Build()
+	deviceLists := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*resourcepoolv1alpha1.GPUDeviceList); ok {
+				deviceLists++
+				if deviceLists == 2 {
+					if err := delegated.Create(ctx, deviceB.DeepCopy()); err != nil {
+						t.Fatalf("create late GPUDevice: %v", err)
+					}
+				}
+			}
+			return delegated.List(ctx, list, opts...)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("forced pool delete error = %v", err)
+	}
+
+	if deviceLists < 3 {
+		t.Fatalf("GPUDevice list calls = %d, want at least 3", deviceLists)
+	}
+	for _, device := range []*resourcepoolv1alpha1.GPUDevice{deviceA, deviceB} {
+		stored := &resourcepoolv1alpha1.GPUDevice{}
+		if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(device), stored); err != nil {
+			t.Fatalf("get GPUDevice %s: %v", device.Name, err)
+		}
+		if stored.Spec.PoolRef != nil {
+			t.Errorf("GPUDevice %s still references pool: %#v", device.Name, stored.Spec.PoolRef)
+		}
+	}
+}
+
+func TestPoolDeleteForceFailsWhenReferencesDoNotStabilize(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	deviceLists := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*resourcepoolv1alpha1.GPUDeviceList); ok {
+				deviceLists++
+				device := &resourcepoolv1alpha1.GPUDevice{
+					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("device-%d", deviceLists)},
+					Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+						Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: fmt.Sprintf("GPU-%d", deviceLists)},
+						PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+					},
+				}
+				device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+				if err := delegated.Create(ctx, device); err != nil {
+					t.Fatalf("create concurrent GPUDevice: %v", err)
+				}
+			}
+			return delegated.List(ctx, list, opts...)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "references did not stabilize after 5 cleanup passes") {
+		t.Fatalf("forced pool delete error = %v, want bounded cleanup failure", err)
+	}
+	if deviceLists != maxPoolReferenceCleanupPasses+1 {
+		t.Errorf("GPUDevice list calls = %d, want %d", deviceLists, maxPoolReferenceCleanupPasses+1)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("pool changed after unstable cleanup: %v", err)
+	}
+}
+
+func TestPoolDeleteWithoutForceDoesNotRemoveReferences(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu"}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager"},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding, device).Build()
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("plain pool delete error = %v", err)
+	}
+
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); err != nil {
+		t.Errorf("plain delete changed binding: %v", err)
+	}
+	storedDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(device), storedDevice); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpuDevicePoolName(storedDevice); got != pool.Name {
+		t.Errorf("device pool = %q after plain delete, want %q", got, pool.Name)
+	}
+}
+
+func TestPoolDeleteWithoutForceReportsNotFound(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		out:    &bytes.Buffer{},
+		errOut: &bytes.Buffer{},
+	})
+	command.SetArgs([]string{"pool", "delete", "missing-pool"})
+	err := command.Execute()
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("plain pool delete error = %v, want NotFound", err)
+	}
+}
+
+func TestPoolDeleteForceStopsWhenReferenceCleanupFails(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding, device).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			if _, ok := object.(*resourcepoolv1alpha1.ResourcePoolBinding); ok {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "resourcepoolbindings"},
+					object.GetName(),
+					fmt.Errorf("test denial"),
+				)
+			}
+			return delegated.Delete(ctx, object, opts...)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "delete ResourcePoolBinding cert-manager/share-gpu") {
+		t.Fatalf("forced pool delete error = %v, want binding cleanup failure", err)
+	}
+
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("pool changed after cleanup failure: %v", err)
+	}
+	storedDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(device), storedDevice); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpuDevicePoolName(storedDevice); got != pool.Name {
+		t.Errorf("device pool = %q after cleanup failure, want %q", got, pool.Name)
+	}
+}
+
+func TestPoolDeleteForcePreflightsAllReferenceReads(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("pool-uid")}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*resourcepoolv1alpha1.GPUDeviceList); ok {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Group: resourcepoolv1alpha1.GroupVersion.Group, Resource: "gpudevices"},
+					"",
+					fmt.Errorf("test denial"),
+				)
+			}
+			return delegated.List(ctx, list, opts...)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "list GPUDevices") {
+		t.Fatalf("forced pool delete error = %v, want device list failure", err)
+	}
+
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); err != nil {
+		t.Errorf("binding changed before reference preflight completed: %v", err)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(pool), &resourcepoolv1alpha1.ResourcePool{}); err != nil {
+		t.Errorf("pool changed before reference preflight completed: %v", err)
+	}
+}
+
+func TestPoolDeleteForceRejectsSameNamePoolReplacementBeforeMutation(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: types.UID("original-pool-uid")}}
+	replacementUID := types.UID("replacement-pool-uid")
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding, device).Build()
+	replaced := false
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*resourcepoolv1alpha1.ResourcePoolBindingList); ok && !replaced {
+				replaced = true
+				if err := delegated.Delete(ctx, pool); err != nil {
+					t.Fatalf("delete original pool: %v", err)
+				}
+				replacement := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: pool.Name, UID: replacementUID}}
+				if err := delegated.Create(ctx, replacement); err != nil {
+					t.Fatalf("create replacement pool: %v", err)
+				}
+			}
+			return delegated.List(ctx, list, opts...)
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), `ResourcePool UID is "replacement-pool-uid", expected "original-pool-uid"`) {
+		t.Fatalf("forced pool delete error = %v, want pool UID mismatch", err)
+	}
+	if output.Len() != 0 {
+		t.Errorf("forced pool delete wrote mutation output before UID validation: %q", output.String())
+	}
+
+	storedPool := &resourcepoolv1alpha1.ResourcePool{}
+	if err := baseClient.Get(t.Context(), client.ObjectKey{Name: pool.Name}, storedPool); err != nil {
+		t.Fatalf("get replacement pool: %v", err)
+	}
+	if storedPool.UID != replacementUID {
+		t.Errorf("stored pool UID = %q, want %q", storedPool.UID, replacementUID)
+	}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); err != nil {
+		t.Errorf("replacement binding changed: %v", err)
+	}
+	storedDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := baseClient.Get(t.Context(), client.ObjectKeyFromObject(device), storedDevice); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpuDevicePoolName(storedDevice); got != pool.Name {
+		t.Errorf("replacement device pool = %q, want %q", got, pool.Name)
+	}
+}
+
+func TestPoolDeleteForceClearsReferencesFromTerminatingPool(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	deletionTime := metav1.Now()
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{
+		Name:              "share-gpu",
+		UID:               types.UID("pool-uid"),
+		DeletionTimestamp: &deletionTime,
+		Finalizers:        []string{"resource.hami.io/reference-protection"},
+	}}
+	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager", UID: types.UID("binding-uid")},
+		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+	}
+	device := &resourcepoolv1alpha1.GPUDevice{
+		ObjectMeta: metav1.ObjectMeta{Name: "device-a", ResourceVersion: "1"},
+		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+			Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"},
+			PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+		},
+	}
+	device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding, device).Build()
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("forced terminating pool delete error = %v, output = %q", err, output.String())
+	}
+
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); !apierrors.IsNotFound(err) {
+		t.Errorf("get deleted binding error = %v, want NotFound", err)
+	}
+	storedDevice := &resourcepoolv1alpha1.GPUDevice{}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(device), storedDevice); err != nil {
+		t.Fatal(err)
+	}
+	if storedDevice.Spec.PoolRef != nil {
+		t.Errorf("terminating pool device still assigned: %#v", storedDevice.Spec.PoolRef)
+	}
+	storedPool := &resourcepoolv1alpha1.ResourcePool{}
+	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(pool), storedPool); err != nil {
+		t.Fatalf("get finalizer-protected pool: %v", err)
+	}
+	if storedPool.DeletionTimestamp.IsZero() {
+		t.Error("finalizer-protected pool lost deletion timestamp")
+	}
+}
+
 func TestDefaultApplyNamespace(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

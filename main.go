@@ -144,25 +144,136 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 				return nil
 			},
 		},
-		&cobra.Command{
-			Use:   "delete NAME",
-			Short: "Delete an unreferenced resource pool",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(command *cobra.Command, args []string) error {
-				cli, err := options.getClient()
-				if err != nil {
-					return err
-				}
-				pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: args[0]}}
-				if err := cli.Delete(command.Context(), pool); err != nil {
-					return fmt.Errorf("delete resource pool %q: %w", args[0], err)
-				}
-				fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s deleted\n", args[0])
-				return nil
-			},
-		},
+		newPoolDeleteCommand(options),
 	)
 	return command
+}
+
+func newPoolDeleteCommand(options *commandOptions) *cobra.Command {
+	var force bool
+	command := &cobra.Command{
+		Use:   "delete NAME",
+		Short: "Delete a resource pool",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			cli, err := options.getClient()
+			if err != nil {
+				return err
+			}
+			poolName := args[0]
+			pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: poolName}}
+			if force {
+				if err := cli.Get(command.Context(), client.ObjectKey{Name: poolName}, pool); err != nil {
+					return fmt.Errorf("get resource pool %q before forced deletion: %w", poolName, err)
+				}
+				if pool.UID == "" {
+					return fmt.Errorf("resource pool %q has no UID", poolName)
+				}
+				if err := deleteResourcePoolReferences(command.Context(), cli, options.out, pool); err != nil {
+					return fmt.Errorf("remove references to resource pool %q: %w", poolName, err)
+				}
+			}
+			deleteOptions := []client.DeleteOption{}
+			if force {
+				deleteOptions = append(deleteOptions, client.Preconditions{UID: &pool.UID})
+			}
+			if err := cli.Delete(command.Context(), pool, deleteOptions...); err != nil && (!force || !apierrors.IsNotFound(err)) {
+				return fmt.Errorf("delete resource pool %q: %w", poolName, err)
+			}
+			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s deleted\n", poolName)
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&force, "force", false, "Delete ResourcePoolBindings and unassign GPUDevices that reference the pool")
+	return command
+}
+
+const maxPoolReferenceCleanupPasses = 5
+
+func deleteResourcePoolReferences(ctx context.Context, cli client.Client, out io.Writer, pool *resourcepoolv1alpha1.ResourcePool) error {
+	for cleanupPass := 0; ; cleanupPass++ {
+		bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
+		if err := cli.List(ctx, bindings); err != nil {
+			return fmt.Errorf("list ResourcePoolBindings: %w", err)
+		}
+		devices := &resourcepoolv1alpha1.GPUDeviceList{}
+		if err := cli.List(ctx, devices); err != nil {
+			return fmt.Errorf("list GPUDevices: %w", err)
+		}
+		sort.Slice(bindings.Items, func(i, j int) bool {
+			if bindings.Items[i].Namespace == bindings.Items[j].Namespace {
+				return bindings.Items[i].Name < bindings.Items[j].Name
+			}
+			return bindings.Items[i].Namespace < bindings.Items[j].Namespace
+		})
+		sort.Slice(devices.Items, func(i, j int) bool { return devices.Items[i].Name < devices.Items[j].Name })
+
+		matchingBindings := 0
+		for i := range bindings.Items {
+			if bindings.Items[i].Spec.PoolRef.Name == pool.Name {
+				matchingBindings++
+			}
+		}
+		matchingDevices := 0
+		for i := range devices.Items {
+			if gpuDevicePoolName(&devices.Items[i]) == pool.Name {
+				matchingDevices++
+			}
+		}
+		currentPool := &resourcepoolv1alpha1.ResourcePool{}
+		if err := cli.Get(ctx, client.ObjectKey{Name: pool.Name}, currentPool); err != nil {
+			if apierrors.IsNotFound(err) && matchingBindings == 0 && matchingDevices == 0 {
+				return nil
+			}
+			return fmt.Errorf("re-read ResourcePool: %w", err)
+		}
+		if currentPool.UID != pool.UID {
+			return fmt.Errorf("ResourcePool UID is %q, expected %q", currentPool.UID, pool.UID)
+		}
+		if matchingBindings == 0 && matchingDevices == 0 {
+			return nil
+		}
+		if cleanupPass >= maxPoolReferenceCleanupPasses {
+			return fmt.Errorf(
+				"references did not stabilize after %d cleanup passes: %d ResourcePoolBindings and %d GPUDevices still reference the pool",
+				maxPoolReferenceCleanupPasses,
+				matchingBindings,
+				matchingDevices,
+			)
+		}
+
+		for i := range bindings.Items {
+			binding := &bindings.Items[i]
+			if binding.Spec.PoolRef.Name != pool.Name {
+				continue
+			}
+			if binding.UID == "" {
+				return fmt.Errorf("ResourcePoolBinding %s/%s has no UID", binding.Namespace, binding.Name)
+			}
+			if err := cli.Delete(ctx, binding, client.Preconditions{UID: &binding.UID}); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete ResourcePoolBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+			}
+			fmt.Fprintf(out, "resourcepoolbinding.resource.hami.io/%s deleted from namespace %s\n", binding.Name, binding.Namespace)
+		}
+
+		for i := range devices.Items {
+			device := &devices.Items[i]
+			if gpuDevicePoolName(device) != pool.Name {
+				continue
+			}
+			base := device.DeepCopy()
+			device.Spec.PoolRef = nil
+			device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+			if err := cli.Patch(ctx, device, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				if apierrors.IsNotFound(err) {
+					fmt.Fprintf(out, "gpudevice.resource.hami.io/%s already absent\n", device.Name)
+					continue
+				}
+				return fmt.Errorf("unassign GPUDevice %q: %w", device.Name, err)
+			}
+			fmt.Fprintf(out, "gpudevice.resource.hami.io/%s unassigned\n", device.Name)
+		}
+	}
 }
 
 func newDeviceCommand(options *commandOptions) *cobra.Command {

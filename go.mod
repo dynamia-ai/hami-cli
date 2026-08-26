@@ -3,7 +3,7 @@ module github.com/dynamia-ai/hami-cli
 go 1.26.0
 
 require (
-	github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260824104039-b85d4c6f1d21
+	github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826060623-701f7b961ad0
 	github.com/lathe-cli/kitup/go v0.1.3
 	github.com/lathe-cli/kitup/go-cobra v0.1.3
 	github.com/spf13/cobra v1.10.2
