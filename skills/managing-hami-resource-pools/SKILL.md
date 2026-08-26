@@ -18,13 +18,13 @@ Use this skill for audits, namespace access, pool lifecycle, GPU ownership, clea
 ## Operating pattern
 
 1. Run `hami-cli version` and relevant `--help` output. Use the selected `--context` and a bounded `--request-timeout` on every cluster call.
-2. Use `pool describe NAME` for a human-readable view of one pool and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `binding list -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
+2. Use `pool describe NAME` for a human-readable view of one pool and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `pool bindings -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
 3. Choose the ownership mode:
    - Audit: read only.
    - User-owned desired state: use `apply` so an identical manifest is rerunnable.
-   - Temporary test relation: require absence, use `bind`, record its UID, exclude concurrent writers, and re-check the UID immediately before `unbind`.
+   - Temporary test relation: require absence, use `pool bind`, record its UID, exclude concurrent writers, and re-check the UID immediately before `pool unbind`.
    - GPU move: proceed only with explicit authorization and current device/allocation evidence. For temporary cleanup, record the device UID and use `device unassign` with both `--expected-uid` and `--expected-pool`.
-4. Mutate the smallest object set. Prefer `bind`/`unbind`, `device assign`/`device unassign`, and `pool create`/`pool delete` over hand-edited manifests. Use `pool delete --force` only for an intentional pool teardown that should also remove every binding and device assignment referencing that pool.
+4. Mutate the smallest object set. Prefer `pool bind`/`pool unbind`, `device assign`/`device unassign`, and `pool create`/`pool update`/`pool delete` over hand-edited manifests. Use `pool delete --force` only for an intentional pool teardown that should also remove every binding and device assignment referencing that pool.
 5. Verify controller-observed state. For temporary changes, clean up in reverse reference order and compare final maps with the baseline; for persistent changes, prove the intended delta and unchanged unrelated state.
 
 Read [references/operations.md](references/operations.md) before executing mutations or diagnosing failures.
@@ -32,11 +32,12 @@ Read [references/operations.md](references/operations.md) before executing mutat
 ## Safety invariants
 
 - Never assume a namespace exists or is disposable; `hami-cli` cannot establish that fact.
-- Do not combine `binding list -A` with `--namespace`.
+- `pool bindings` requires either one pool name or `-A`/`--all-pools`; do not combine them.
+- `pool bindings` always spans namespaces and rejects an explicit `--namespace`; filter its structured output when only one namespace is relevant.
 - Supported output formats are `table`, `name`, `json`, and `yaml`; there is no `wide` output.
-- Repeating `bind` returns `AlreadyExists`. Use `apply` only when the caller owns the desired object; do not adopt an unrelated binding.
-- `unbind` and plain `pool delete` are name-based deletes without UID preconditions. `pool delete --force` reads the target first and uses UID preconditions for the pool and each binding plus optimistic patches for devices, but it is still a destructive teardown rather than temporary-cleanup ownership proof.
-- `unbind` affects future Pod authorization. It does not evict existing Pods or reclaim their GPUs.
+- Repeating `pool bind` returns `AlreadyExists`. Use `apply` only when the caller owns the desired object; do not adopt an unrelated binding.
+- `pool unbind` and plain `pool delete` are name-based deletes without UID preconditions. `pool delete --force` reads the target first and uses UID preconditions for the pool and each binding plus optimistic patches for devices, but it is still a destructive teardown rather than temporary-cleanup ownership proof.
+- `pool unbind` affects future Pod authorization. It does not evict existing Pods or reclaim their GPUs.
 - `pool delete --force` deletes matching namespace bindings and clears matching GPU assignments, but it does not evict existing Pods. It re-lists both reference types after each cleanup pass, accepts a listed reference disappearing concurrently, and accepts the pool disappearing only after an empty reference snapshot. It fails if references remain after five passes. Other cleanup failures stop pool deletion; earlier successful cleanup is not rolled back, so re-read all references before retrying.
 - An empty allocation list does not exclude concurrent scheduling. Coordinate a scheduling freeze or obtain owner confirmation before moving a live GPU.
 - `device unassign` without ownership flags clears the assignment observed by its internal read. Temporary cleanup must pass both `--expected-uid` and `--expected-pool` so an earlier replacement or reassignment fails closed; a later change conflicts with the command's optimistic patch.

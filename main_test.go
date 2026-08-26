@@ -170,7 +170,7 @@ func TestDeviceListTableAlignsLongValues(t *testing.T) {
 	}
 }
 
-func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
+func TestPoolBindingsListsOnlyTargetPoolAcrossNamespaces(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
@@ -178,77 +178,127 @@ func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 	}
 	objects := []client.Object{
 		&resourcepoolv1alpha1.ResourcePoolBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pool-b", Namespace: "team-b"},
-			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-b"}},
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-b"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-a"}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionFalse},
+			}},
 		},
 		&resourcepoolv1alpha1.ResourcePoolBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a"},
 			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-a"}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionTrue},
+			}},
+		},
+		&resourcepoolv1alpha1.ResourcePoolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-b", Namespace: "team-c"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-b"}},
 		},
 	}
 	newOptions := func() (*commandOptions, *bytes.Buffer) {
 		output := &bytes.Buffer{}
-		overrides := &clientcmd.ConfigOverrides{}
-		rawConfig := clientcmdapi.Config{
-			CurrentContext: "test",
-			Contexts: map[string]*clientcmdapi.Context{
-				"test": {Namespace: "default"},
-			},
-		}
 		return &commandOptions{
-			overrides:    overrides,
-			clientConfig: clientcmd.NewDefaultClientConfig(rawConfig, overrides),
-			client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
-			out:          output,
-			errOut:       output,
+			client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+			out:    output,
+			errOut: output,
 		}, output
 	}
 
 	options, output := newOptions()
 	command := newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--namespace", "team-a", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "pool-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("namespaced binding list error = %v", err)
+		t.Fatalf("pool bindings table error = %v", err)
 	}
-	if got, want := strings.TrimSpace(output.String()), "resourcepoolbinding.resource.hami.io/pool-a"; got != want {
-		t.Fatalf("namespaced binding list = %q, want %q", got, want)
+	wantTable := "" +
+		"NAMESPACE  BINDING  BOUND\n" +
+		"team-a     pool-a   True\n" +
+		"team-b     pool-a   False\n"
+	if got := output.String(); got != wantTable {
+		t.Fatalf("pool bindings table = %q, want %q", got, wantTable)
 	}
 
 	options, output = newOptions()
 	command = newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--all-namespaces", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "pool-a", "-o", "json"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("all-namespaces binding list error = %v", err)
+		t.Fatalf("structured pool bindings error = %v", err)
 	}
-	if got, want := output.String(), "resourcepoolbinding.resource.hami.io/pool-a\nresourcepoolbinding.resource.hami.io/pool-b\n"; got != want {
-		t.Fatalf("all-namespaces binding list = %q, want %q", got, want)
+	bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
+	if err := json.Unmarshal(output.Bytes(), bindings); err != nil {
+		t.Fatalf("decode pool bindings JSON: %v", err)
 	}
-
-	conflicts := [][]string{
-		{"binding", "list", "--namespace", "team-a", "--all-namespaces"},
-		{"binding", "ls", "-n", "team-a", "-A"},
+	if len(bindings.Items) != 2 {
+		t.Fatalf("pool bindings = %d, want 2", len(bindings.Items))
 	}
-	for _, args := range conflicts {
-		options, _ = newOptions()
-		command = newRootCommand(options)
-		command.SetArgs(args)
-		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
-			t.Errorf("%v error = %v, want namespace conflict rejection", args, err)
+	for i, namespace := range []string{"team-a", "team-b"} {
+		if bindings.Items[i].Namespace != namespace || bindings.Items[i].Spec.PoolRef.Name != "pool-a" {
+			t.Errorf("pool binding %d = %s/%s -> %s, want namespace %s and pool-a", i, bindings.Items[i].Namespace, bindings.Items[i].Name, bindings.Items[i].Spec.PoolRef.Name, namespace)
 		}
 	}
 
 	options, output = newOptions()
 	command = newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--namespace", "team-a", "--all-namespaces=false", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "-A"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("explicit false all-namespaces error = %v", err)
+		t.Fatalf("all-pools bindings table error = %v", err)
 	}
-	if got, want := strings.TrimSpace(output.String()), "resourcepoolbinding.resource.hami.io/pool-a"; got != want {
-		t.Fatalf("explicit false all-namespaces result = %q, want %q", got, want)
+	wantAllTable := "" +
+		"NAMESPACE  BINDING  POOL    BOUND\n" +
+		"team-a     pool-a   pool-a  True\n" +
+		"team-b     pool-a   pool-a  False\n" +
+		"team-c     pool-b   pool-b  Unknown\n"
+	if got := output.String(); got != wantAllTable {
+		t.Fatalf("all-pools bindings table = %q, want %q", got, wantAllTable)
 	}
 }
 
-func TestBindAndUnbindAreRootCommands(t *testing.T) {
+func TestPoolBindingsRequiresNameOrAllPools(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing selection",
+			args: []string{"pool", "bindings"},
+			want: "either NAME or --all-pools must be specified",
+		},
+		{
+			name: "conflicting selection",
+			args: []string{"pool", "bindings", "pool-a", "-A"},
+			want: "NAME cannot be combined with --all-pools",
+		},
+		{
+			name: "target pool with namespace",
+			args: []string{"pool", "bindings", "pool-a", "--namespace", "team-a"},
+			want: "--namespace cannot be used with pool bindings",
+		},
+		{
+			name: "all pools with namespace",
+			args: []string{"pool", "bindings", "-A", "-n", "team-a"},
+			want: "--namespace cannot be used with pool bindings",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    &bytes.Buffer{},
+				errOut: &bytes.Buffer{},
+			})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("pool bindings error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPoolBindAndUnbindReplaceRootBindingCommands(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
@@ -273,9 +323,9 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	}
 
 	command := newRootCommand(newOptions())
-	command.SetArgs([]string{"bind", "--namespace", "team-a", "--pool", "training-a"})
+	command.SetArgs([]string{"pool", "bind", "training-a", "--namespace", "team-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("root bind error = %v", err)
+		t.Fatalf("pool bind error = %v", err)
 	}
 	binding := &resourcepoolv1alpha1.ResourcePoolBinding{}
 	key := client.ObjectKey{Name: "training-a", Namespace: "team-a"}
@@ -284,18 +334,24 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	}
 
 	command = newRootCommand(newOptions())
-	command.SetArgs([]string{"unbind", "--namespace", "team-a", "--pool", "training-a"})
+	command.SetArgs([]string{"pool", "unbind", "training-a", "--namespace", "team-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("root unbind error = %v", err)
+		t.Fatalf("pool unbind error = %v", err)
 	}
 	if err := cli.Get(t.Context(), key, binding); !apierrors.IsNotFound(err) {
 		t.Fatalf("get deleted binding error = %v, want NotFound", err)
 	}
 
-	command = newRootCommand(newOptions())
-	command.SetArgs([]string{"binding", "bind", "--pool", "training-a"})
-	if err := command.Execute(); err == nil {
-		t.Fatal("nested binding bind succeeded, want rejected route")
+	for _, args := range [][]string{
+		{"binding", "list"},
+		{"bind", "--pool", "training-a"},
+		{"unbind", "--pool", "training-a"},
+	} {
+		command = newRootCommand(newOptions())
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Errorf("removed root route %v succeeded, want rejected", args)
+		}
 	}
 }
 
@@ -318,6 +374,181 @@ func TestPoolListNameOutput(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(output.String()), "resourcepool.resource.hami.io/training-a"; got != want {
 		t.Fatalf("pool list = %q, want %q", got, want)
+	}
+}
+
+func TestPoolUpdateChangesOnlyRequestedSchedulingPolicies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		args     []string
+		wantNode resourcepoolv1alpha1.NodeSchedulerPolicy
+		wantGPU  resourcepoolv1alpha1.GPUSchedulerPolicy
+	}{
+		{
+			name:     "node policy",
+			args:     []string{"--node-scheduler-policy", "spread"},
+			wantNode: resourcepoolv1alpha1.NodeSchedulerPolicySpread,
+			wantGPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+		},
+		{
+			name:     "GPU policies",
+			args:     []string{"--gpu-scheduler-policy", "topology-aware,mutex"},
+			wantNode: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+			wantGPU:  resourcepoolv1alpha1.GPUSchedulerPolicy("topology-aware,mutex"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			scheme := runtime.NewScheme()
+			if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			pool := &resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a", Labels: map[string]string{"owner": "platform"}},
+				Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+					WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+						SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
+							Node: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+							GPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+						},
+					},
+				},
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+			command.SetArgs(append([]string{"pool", "update", pool.Name}, test.args...))
+			if err := command.Execute(); err != nil {
+				t.Fatalf("pool update error = %v", err)
+			}
+
+			updated := &resourcepoolv1alpha1.ResourcePool{}
+			if err := cli.Get(t.Context(), client.ObjectKey{Name: pool.Name}, updated); err != nil {
+				t.Fatalf("get updated pool: %v", err)
+			}
+			policy := updated.Spec.WorkloadDefaults.SchedulingPolicy
+			if policy.Node != test.wantNode || policy.GPU != test.wantGPU {
+				t.Fatalf("updated policy = %#v, want node %q and GPU %q", policy, test.wantNode, test.wantGPU)
+			}
+			if updated.Labels["owner"] != "platform" {
+				t.Fatalf("updated labels = %#v, want unrelated label preserved", updated.Labels)
+			}
+			if got, want := output.String(), "resourcepool.resource.hami.io/training-a updated\n"; got != want {
+				t.Fatalf("pool update output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "no policy flags",
+			args: []string{"pool", "update", "training-a"},
+			want: "at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified",
+		},
+		{
+			name: "invalid node policy",
+			args: []string{"pool", "update", "training-a", "--node-scheduler-policy", "random"},
+			want: `invalid node scheduler policy "random"`,
+		},
+		{
+			name: "invalid GPU policy",
+			args: []string{"pool", "update", "training-a", "--gpu-scheduler-policy", "topology-aware,exclusive"},
+			want: `invalid GPU scheduler policy "exclusive"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    &bytes.Buffer{},
+				errOut: &bytes.Buffer{},
+			})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("pool update error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPoolUpdateRejectsConcurrentResourcePoolChange(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", ResourceVersion: "7"},
+		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
+					Node: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+					GPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+				},
+			},
+		},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, _ client.WithWatch, object client.Object, patch client.Patch, _ ...client.PatchOption) error {
+			data, err := patch.Data(object)
+			if err != nil {
+				t.Fatalf("encode optimistic patch: %v", err)
+			}
+			optimistic := make(map[string]any)
+			if err := sigsyaml.Unmarshal(data, &optimistic); err != nil {
+				t.Fatalf("decode optimistic patch: %v", err)
+			}
+			resourceVersion, found, err := unstructured.NestedString(optimistic, "metadata", "resourceVersion")
+			if err != nil || !found || resourceVersion != "7" {
+				t.Fatalf("optimistic patch resourceVersion = %q, found = %v, error = %v", resourceVersion, found, err)
+			}
+			nodePolicy, found, err := unstructured.NestedString(optimistic, "spec", "workloadDefaults", "schedulingPolicy", "node")
+			if err != nil || !found || nodePolicy != "spread" {
+				t.Fatalf("optimistic patch node policy = %q, found = %v, error = %v", nodePolicy, found, err)
+			}
+			if gpuPolicy, found, err := unstructured.NestedString(optimistic, "spec", "workloadDefaults", "schedulingPolicy", "gpu"); err != nil || found {
+				t.Fatalf("optimistic patch GPU policy = %q, found = %v, error = %v; want omitted", gpuPolicy, found, err)
+			}
+			if _, found, err := unstructured.NestedMap(optimistic, "metadata", "labels"); err != nil || found {
+				t.Fatalf("optimistic patch labels found = %v, error = %v; want omitted", found, err)
+			}
+
+			latest := pool.DeepCopy()
+			latest.Labels = map[string]string{"concurrent": "preserved"}
+			latest.Spec.WorkloadDefaults.SchedulingPolicy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware
+			if err := baseClient.Update(ctx, latest); err != nil {
+				t.Fatalf("simulate concurrent pool update: %v", err)
+			}
+			return apierrors.NewConflict(
+				resourcepoolv1alpha1.GroupVersion.WithResource("resourcepools").GroupResource(),
+				object.GetName(),
+				fmt.Errorf("changed concurrently"),
+			)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "update", pool.Name, "--node-scheduler-policy", "spread"})
+	err := command.Execute()
+	if err == nil || !apierrors.IsConflict(err) || !strings.Contains(err.Error(), `update resource pool "training-a"`) {
+		t.Fatalf("pool update error = %v, want wrapped conflict", err)
+	}
+	updated := &resourcepoolv1alpha1.ResourcePool{}
+	if err := baseClient.Get(t.Context(), client.ObjectKey{Name: pool.Name}, updated); err != nil {
+		t.Fatalf("get concurrently updated pool: %v", err)
+	}
+	if updated.Labels["concurrent"] != "preserved" || updated.Spec.WorkloadDefaults.SchedulingPolicy.GPU != resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware {
+		t.Fatalf("concurrent pool state = %#v, want label and GPU policy preserved", updated)
 	}
 }
 

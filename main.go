@@ -73,9 +73,6 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	command.AddCommand(
 		newPoolCommand(options),
 		newDeviceCommand(options),
-		newBindingCommand(options),
-		newBindCommand(options),
-		newUnbindCommand(options),
 		newApplyCommand(options),
 		newSkillCommand(options),
 		newVersionCommand(options),
@@ -123,7 +120,11 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 	addOutputFlag(list)
 	command.AddCommand(
 		list,
+		newPoolBindingsCommand(options),
+		newPoolBindCommand(options),
 		newPoolDescribeCommand(options),
+		newPoolUnbindCommand(options),
+		newPoolUpdateCommand(options),
 		&cobra.Command{
 			Use:   "create NAME",
 			Short: "Create an empty resource pool",
@@ -148,6 +149,98 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 		newPoolDeleteCommand(options),
 	)
 	return command
+}
+
+func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
+	var nodePolicy string
+	var gpuPolicy string
+	command := &cobra.Command{
+		Use:   "update NAME",
+		Short: "Update workload scheduling defaults for a resource pool",
+		Args:  cobra.ExactArgs(1),
+		PreRunE: func(command *cobra.Command, _ []string) error {
+			nodeChanged := command.Flags().Changed("node-scheduler-policy")
+			gpuChanged := command.Flags().Changed("gpu-scheduler-policy")
+			if !nodeChanged && !gpuChanged {
+				return errors.New("at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified")
+			}
+			if nodeChanged {
+				if err := validateNodeSchedulerPolicy(nodePolicy); err != nil {
+					return err
+				}
+			}
+			if gpuChanged {
+				if err := validateGPUSchedulerPolicy(gpuPolicy); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		RunE: func(command *cobra.Command, args []string) error {
+			cli, err := options.getClient()
+			if err != nil {
+				return err
+			}
+			poolName := args[0]
+			pool := &resourcepoolv1alpha1.ResourcePool{}
+			if err := cli.Get(command.Context(), client.ObjectKey{Name: poolName}, pool); err != nil {
+				return fmt.Errorf("get resource pool %q: %w", poolName, err)
+			}
+
+			base := pool.DeepCopy()
+			if pool.Spec.WorkloadDefaults == nil {
+				pool.Spec.WorkloadDefaults = &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{}
+			}
+			if pool.Spec.WorkloadDefaults.SchedulingPolicy == nil {
+				pool.Spec.WorkloadDefaults.SchedulingPolicy = &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{}
+			}
+			policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
+			if command.Flags().Changed("node-scheduler-policy") {
+				policy.Node = resourcepoolv1alpha1.NodeSchedulerPolicy(nodePolicy)
+			}
+			if command.Flags().Changed("gpu-scheduler-policy") {
+				policy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicy(gpuPolicy)
+			}
+
+			if err := cli.Patch(command.Context(), pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				return fmt.Errorf("update resource pool %q: %w", poolName, err)
+			}
+			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s updated\n", poolName)
+			return nil
+		},
+	}
+	command.Flags().StringVar(&nodePolicy, "node-scheduler-policy", "", "Node scheduling policy: binpack or spread")
+	command.Flags().StringVar(&gpuPolicy, "gpu-scheduler-policy", "", "Ordered, comma-separated GPU policies: binpack, spread, topology-aware, mutex, or numa")
+	return command
+}
+
+func validateNodeSchedulerPolicy(policy string) error {
+	switch resourcepoolv1alpha1.NodeSchedulerPolicy(policy) {
+	case resourcepoolv1alpha1.NodeSchedulerPolicyBinpack, resourcepoolv1alpha1.NodeSchedulerPolicySpread:
+		return nil
+	default:
+		return fmt.Errorf("invalid node scheduler policy %q; must be binpack or spread", policy)
+	}
+}
+
+func validateGPUSchedulerPolicy(policy string) error {
+	validPolicies := map[resourcepoolv1alpha1.GPUSchedulerPolicy]struct{}{
+		resourcepoolv1alpha1.GPUSchedulerPolicyBinpack:       {},
+		resourcepoolv1alpha1.GPUSchedulerPolicySpread:        {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware: {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyMutex:         {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyNUMA:          {},
+	}
+	for policyPart := range strings.SplitSeq(policy, ",") {
+		if _, ok := validPolicies[resourcepoolv1alpha1.GPUSchedulerPolicy(policyPart)]; !ok {
+			return fmt.Errorf(
+				"invalid GPU scheduler policy %q in %q; must be binpack, spread, topology-aware, mutex, or numa",
+				policyPart,
+				policy,
+			)
+		}
+	}
+	return nil
 }
 
 func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
@@ -539,38 +632,48 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 	return command
 }
 
-func newBindingCommand(options *commandOptions) *cobra.Command {
-	command := &cobra.Command{Use: "binding", Short: "Manage namespace access to ResourcePools"}
-	command.AddCommand(newBindingListCommand(options))
-	return command
-}
-
-func newBindingListCommand(options *commandOptions) *cobra.Command {
-	var allNamespaces bool
+func newPoolBindingsCommand(options *commandOptions) *cobra.Command {
+	var allPools bool
 	command := &cobra.Command{
-		Use:     "list",
-		Aliases: []string{"ls"},
-		Short:   "List namespace resource-pool bindings",
-		Args:    cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			if allNamespaces && command.Flags().Changed("namespace") {
-				return errors.New("--all-namespaces cannot be combined with --namespace")
+		Use:   "bindings [NAME]",
+		Short: "List namespace bindings for one or all resource pools",
+		Args:  cobra.MaximumNArgs(1),
+		PreRunE: func(command *cobra.Command, args []string) error {
+			if command.Flags().Changed("namespace") {
+				return errors.New("--namespace cannot be used with pool bindings; results always span namespaces")
 			}
+			if len(args) == 0 && !allPools {
+				return errors.New("either NAME or --all-pools must be specified")
+			}
+			if len(args) == 1 && allPools {
+				return errors.New("NAME cannot be combined with --all-pools")
+			}
+			return nil
+		},
+		RunE: func(command *cobra.Command, args []string) error {
 			cli, err := options.getClient()
 			if err != nil {
 				return err
 			}
-			bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
-			listOptions := make([]client.ListOption, 0, 1)
-			if !allNamespaces {
-				namespace, err := options.namespace()
-				if err != nil {
-					return err
-				}
-				listOptions = append(listOptions, client.InNamespace(namespace))
+			poolName := ""
+			if len(args) == 1 {
+				poolName = args[0]
 			}
-			if err := cli.List(command.Context(), bindings, listOptions...); err != nil {
-				return fmt.Errorf("list resource-pool bindings: %w", err)
+			bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
+			if err := cli.List(command.Context(), bindings); err != nil {
+				if allPools {
+					return fmt.Errorf("list resource-pool bindings: %w", err)
+				}
+				return fmt.Errorf("list bindings for resource pool %q: %w", poolName, err)
+			}
+			if !allPools {
+				matchingBindings := bindings.Items[:0]
+				for i := range bindings.Items {
+					if bindings.Items[i].Spec.PoolRef.Name == poolName {
+						matchingBindings = append(matchingBindings, bindings.Items[i])
+					}
+				}
+				bindings.Items = matchingBindings
 			}
 			sort.Slice(bindings.Items, func(i, j int) bool {
 				if bindings.Items[i].Namespace == bindings.Items[j].Namespace {
@@ -584,15 +687,23 @@ func newBindingListCommand(options *commandOptions) *cobra.Command {
 				return printObject(options.out, output, bindings, bindingNames(bindings))
 			}
 			writer := newTableWriter(options.out)
-			fmt.Fprintln(writer, "NAMESPACE\tNAME\tPOOL\tBOUND")
+			if allPools {
+				fmt.Fprintln(writer, "NAMESPACE\tBINDING\tPOOL\tBOUND")
+				for i := range bindings.Items {
+					binding := &bindings.Items[i]
+					fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", binding.Namespace, binding.Name, binding.Spec.PoolRef.Name, bindingConditionStatus(binding))
+				}
+				return writer.Flush()
+			}
+			fmt.Fprintln(writer, "NAMESPACE\tBINDING\tBOUND")
 			for i := range bindings.Items {
 				binding := &bindings.Items[i]
-				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", binding.Namespace, binding.Name, binding.Spec.PoolRef.Name, bindingConditionStatus(binding))
+				fmt.Fprintf(writer, "%s\t%s\t%s\n", binding.Namespace, binding.Name, bindingConditionStatus(binding))
 			}
 			return writer.Flush()
 		},
 	}
-	command.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "List bindings across all namespaces")
+	command.Flags().BoolVarP(&allPools, "all-pools", "A", false, "List bindings for all resource pools")
 	addOutputFlag(command)
 	return command
 }
@@ -601,13 +712,12 @@ func newTableWriter(out io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 }
 
-func newBindCommand(options *commandOptions) *cobra.Command {
-	var pool string
+func newPoolBindCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
-		Use:   "bind --namespace NAMESPACE --pool POOL",
+		Use:   "bind NAME --namespace NAMESPACE",
 		Short: "Grant a namespace access to a resource pool",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
 			namespace, err := options.namespace()
 			if err != nil {
 				return err
@@ -616,34 +726,32 @@ func newBindCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			poolName := args[0]
 			binding := &resourcepoolv1alpha1.ResourcePoolBinding{
 				TypeMeta: metav1.TypeMeta{APIVersion: resourcepoolv1alpha1.GroupVersion.String(), Kind: "ResourcePoolBinding"},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      pool,
+					Name:      poolName,
 					Namespace: namespace,
-					Labels:    map[string]string{resourcepoolv1alpha1.PoolLabel: pool},
+					Labels:    map[string]string{resourcepoolv1alpha1.PoolLabel: poolName},
 				},
-				Spec: resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool}},
+				Spec: resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: poolName}},
 			}
 			if err := cli.Create(command.Context(), binding); err != nil {
-				return fmt.Errorf("bind namespace %q to resource pool %q: %w", namespace, pool, err)
+				return fmt.Errorf("bind namespace %q to resource pool %q: %w", namespace, poolName, err)
 			}
-			fmt.Fprintf(options.out, "resourcepoolbinding.resource.hami.io/%s created in namespace %s\n", pool, namespace)
+			fmt.Fprintf(options.out, "resourcepoolbinding.resource.hami.io/%s created in namespace %s\n", poolName, namespace)
 			return nil
 		},
 	}
-	command.Flags().StringVar(&pool, "pool", "", "ResourcePool name")
-	_ = command.MarkFlagRequired("pool")
 	return command
 }
 
-func newUnbindCommand(options *commandOptions) *cobra.Command {
-	var pool string
+func newPoolUnbindCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
-		Use:   "unbind --namespace NAMESPACE --pool POOL",
+		Use:   "unbind NAME --namespace NAMESPACE",
 		Short: "Revoke a namespace's resource-pool access for future Pods",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
 			namespace, err := options.namespace()
 			if err != nil {
 				return err
@@ -652,16 +760,15 @@ func newUnbindCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			binding := &resourcepoolv1alpha1.ResourcePoolBinding{ObjectMeta: metav1.ObjectMeta{Name: pool, Namespace: namespace}}
+			poolName := args[0]
+			binding := &resourcepoolv1alpha1.ResourcePoolBinding{ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: namespace}}
 			if err := cli.Delete(command.Context(), binding); err != nil {
-				return fmt.Errorf("unbind namespace %q from resource pool %q: %w", namespace, pool, err)
+				return fmt.Errorf("unbind namespace %q from resource pool %q: %w", namespace, poolName, err)
 			}
-			fmt.Fprintf(options.out, "resourcepoolbinding.resource.hami.io/%s deleted from namespace %s\n", pool, namespace)
+			fmt.Fprintf(options.out, "resourcepoolbinding.resource.hami.io/%s deleted from namespace %s\n", poolName, namespace)
 			return nil
 		},
 	}
-	command.Flags().StringVar(&pool, "pool", "", "ResourcePool name")
-	_ = command.MarkFlagRequired("pool")
 	return command
 }
 
