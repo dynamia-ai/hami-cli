@@ -18,7 +18,7 @@ Use this skill for audits, namespace access, pool lifecycle, GPU ownership, clea
 ## Operating pattern
 
 1. Run `hami-cli version` and relevant `--help` output. Use the selected `--context` and a bounded `--request-timeout` on every cluster call.
-2. Use `pool describe NAME` for a human-readable view of one pool and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `pool bindings -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
+2. Use `pool describe NAME` for a human-readable view of one pool, its CPU and memory quota ledger, and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `pool bindings -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
 3. Choose the ownership mode:
    - Audit: read only.
    - User-owned desired state: use `apply` so an identical manifest is rerunnable.
@@ -42,4 +42,5 @@ Read [references/operations.md](references/operations.md) before executing mutat
 - An empty allocation list does not exclude concurrent scheduling. Coordinate a scheduling freeze or obtain owner confirmation before moving a live GPU.
 - `device unassign` without ownership flags clears the assignment observed by its internal read. Temporary cleanup must pass both `--expected-uid` and `--expected-pool` so an earlier replacement or reassignment fails closed; a later change conflicts with the command's optimistic patch.
 - `pool delete` is asynchronous because reference-protection finalizers may delay removal. Wait for absence; never strip the finalizer to make a test pass.
+- `pool create` and `pool update` write only `spec.quota`; the manager owns `status.quota`. CPU and memory values are Kubernetes quantities, zero is a hard zero ceiling, and the literal `unlimited` removes only the selected dimension. Updates use an optimistic lock, so a conflict requires a fresh read rather than an overwrite.
 - On conflicts, forbidden responses, unknown resource types, timeouts, or ambiguous writes, re-read state and fail closed. Do not bypass RBAC or TLS validation.

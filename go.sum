@@ -10,8 +10,8 @@ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826060623-701f7b961ad0 h1:7QEARUupPPnzoOmEUs55n4IIgWNBKmU+1dVITBB68yA=
-github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826060623-701f7b961ad0/go.mod h1:fITF3QvNQ5qjUNWfWbnGxMvWxt5DXxfFiPMWmPlDgJw=
+github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826131649-4cc2f4b543cd h1:80TI/9y/4ZMI/7XDFC8j1vtGsYkAF9P8tt1Adqzs4wo=
+github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826131649-4cc2f4b543cd/go.mod h1:ZM1AWRXzsPuvqt717dSuc4hbNwW0F4Y8tipjY5tgNeE=
 github.com/emicklei/go-restful/v3 v3.13.0 h1:C4Bl2xDndpU6nJ4bc1jXd+uTmYPVUwkD6bFY/oTyCes=
 github.com/emicklei/go-restful/v3 v3.13.0/go.mod h1:6n3XBCmQQb25CM2LCACGz8ukIrRry+4bhvbpWn3mrbc=
 github.com/evanphx/json-patch/v5 v5.9.11 h1:/8HVnzMq13/3x9TPvjG08wUGqBTmZBsCWzjTM0wiaDU=

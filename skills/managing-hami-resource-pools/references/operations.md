@@ -167,14 +167,23 @@ The UID re-read detects earlier replacement but is not an atomic delete precondi
 
 ## Manage pool and device ownership
 
-Create an empty pool and inspect candidates:
+Create a pool with optional aggregate CPU and memory hard quotas, then inspect
+the declared state and device candidates:
 
 ```bash
 HAMI_POOL=training
-"${HAMI[@]}" pool create "$HAMI_POOL"
+"${HAMI[@]}" pool create "$HAMI_POOL" \
+  --cpu-quota 128 \
+  --memory-quota 512Gi
+"${HAMI[@]}" pool describe "$HAMI_POOL"
 "${HAMI[@]}" pool list -o json
 "${HAMI[@]}" device list -o json
 ```
+
+Both quota flags are optional and accept Kubernetes quantities. An omitted
+dimension is unlimited. Zero is a valid hard ceiling that rejects new non-zero
+usage; it does not mean unlimited. For every controlled dimension, admitted
+workload containers must declare equal, non-zero requests and limits.
 
 Set or change the pool defaults applied to workloads that do not already carry
 the corresponding scheduler annotations:
@@ -182,13 +191,23 @@ the corresponding scheduler annotations:
 ```bash
 "${HAMI[@]}" pool update "$HAMI_POOL" \
   --node-scheduler-policy spread \
-  --gpu-scheduler-policy topology-aware,mutex
+  --gpu-scheduler-policy topology-aware,mutex \
+  --cpu-quota 192 \
+  --memory-quota 768Gi
 "${HAMI[@]}" pool describe "$HAMI_POOL"
 ```
 
-Either scheduler-policy flag may be used on its own. The update preserves the
-other policy and rejects a concurrent ResourcePool change instead of
-overwriting it.
+Any scheduler-policy or quota flag may be used on its own. The update preserves
+every omitted field and rejects a concurrent ResourcePool change instead of
+overwriting it. Remove one quota dimension explicitly without changing the
+other:
+
+```bash
+"${HAMI[@]}" pool update "$HAMI_POOL" --cpu-quota unlimited
+```
+
+`pool describe` reports the configured ceilings and the manager-owned used and
+reserved ledger when status is available. The CLI never writes `status.quota`.
 
 Before `pool create`, require the name to be absent. For a temporary lifecycle, exclude other writers for that pool name from the absence check through confirmed deletion. After a successful create, read and record the pool UID. An `AlreadyExists` or ambiguous create result does not establish ownership; do not later delete that pool without independent proof.
 
