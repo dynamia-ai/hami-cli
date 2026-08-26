@@ -123,6 +123,7 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 	addOutputFlag(list)
 	command.AddCommand(
 		list,
+		newPoolDescribeCommand(options),
 		&cobra.Command{
 			Use:   "create NAME",
 			Short: "Create an empty resource pool",
@@ -147,6 +148,123 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 		newPoolDeleteCommand(options),
 	)
 	return command
+}
+
+func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "describe NAME",
+		Short: "Show a resource pool and its namespace and device associations",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			cli, err := options.getClient()
+			if err != nil {
+				return err
+			}
+			poolName := args[0]
+			pool := &resourcepoolv1alpha1.ResourcePool{}
+			if err := cli.Get(command.Context(), client.ObjectKey{Name: poolName}, pool); err != nil {
+				return fmt.Errorf("get resource pool %q: %w", poolName, err)
+			}
+
+			bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
+			if err := cli.List(command.Context(), bindings); err != nil {
+				return fmt.Errorf("list resource-pool bindings for resource pool %q: %w", poolName, err)
+			}
+			matchingBindings := bindings.Items[:0]
+			for i := range bindings.Items {
+				if bindings.Items[i].Spec.PoolRef.Name == poolName {
+					matchingBindings = append(matchingBindings, bindings.Items[i])
+				}
+			}
+			bindings.Items = matchingBindings
+			sort.Slice(bindings.Items, func(i, j int) bool {
+				if bindings.Items[i].Namespace == bindings.Items[j].Namespace {
+					return bindings.Items[i].Name < bindings.Items[j].Name
+				}
+				return bindings.Items[i].Namespace < bindings.Items[j].Namespace
+			})
+
+			devices := &resourcepoolv1alpha1.GPUDeviceList{}
+			if err := cli.List(command.Context(), devices); err != nil {
+				return fmt.Errorf("list GPU devices for resource pool %q: %w", poolName, err)
+			}
+			matchingDevices := devices.Items[:0]
+			for i := range devices.Items {
+				if gpuDevicePoolName(&devices.Items[i]) == poolName {
+					matchingDevices = append(matchingDevices, devices.Items[i])
+				}
+			}
+			devices.Items = matchingDevices
+			sort.Slice(devices.Items, func(i, j int) bool {
+				left, right := &devices.Items[i], &devices.Items[j]
+				if left.Spec.Identity.NodeName != right.Spec.Identity.NodeName {
+					return left.Spec.Identity.NodeName < right.Spec.Identity.NodeName
+				}
+				if left.Spec.Identity.DeviceID != right.Spec.Identity.DeviceID {
+					return left.Spec.Identity.DeviceID < right.Spec.Identity.DeviceID
+				}
+				return left.Name < right.Name
+			})
+
+			return printPoolDescription(options.out, pool, bindings, devices)
+		},
+	}
+}
+
+func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, devices *resourcepoolv1alpha1.GPUDeviceList) error {
+	nodePolicy, gpuPolicy := "<unset>", "<unset>"
+	if pool.Spec.WorkloadDefaults != nil && pool.Spec.WorkloadDefaults.SchedulingPolicy != nil {
+		policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
+		if policy.Node != "" {
+			nodePolicy = string(policy.Node)
+		}
+		if policy.GPU != "" {
+			gpuPolicy = string(policy.GPU)
+		}
+	}
+	revision := pool.Status.Revision
+	if revision == "" {
+		revision = "<none>"
+	}
+
+	writer := newTableWriter(out)
+	fmt.Fprintf(writer, "Name:\t%s\n", pool.Name)
+	fmt.Fprintf(writer, "Node scheduler policy:\t%s\n", nodePolicy)
+	fmt.Fprintf(writer, "GPU scheduler policy:\t%s\n", gpuPolicy)
+	fmt.Fprintf(writer, "Discovered devices:\t%d\n", pool.Status.DiscoveredDevices)
+	fmt.Fprintf(writer, "Healthy devices:\t%d\n", pool.Status.HealthyDevices)
+	fmt.Fprintf(writer, "Revision:\t%s\n", revision)
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(out, "\nNamespaces:")
+	if len(bindings.Items) == 0 {
+		fmt.Fprintln(out, "  <none>")
+	} else {
+		writer = newTableWriter(out)
+		fmt.Fprintln(writer, "  NAMESPACE\tBINDING\tBOUND")
+		for i := range bindings.Items {
+			binding := &bindings.Items[i]
+			fmt.Fprintf(writer, "  %s\t%s\t%s\n", binding.Namespace, binding.Name, bindingConditionStatus(binding))
+		}
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintln(out, "\nDevices:")
+	if len(devices.Items) == 0 {
+		fmt.Fprintln(out, "  <none>")
+		return nil
+	}
+	writer = newTableWriter(out)
+	fmt.Fprintln(writer, "  NAME\tNODE\tDEVICE-ID\tDISCOVERED\tHEALTHY")
+	for i := range devices.Items {
+		device := &devices.Items[i]
+		fmt.Fprintf(writer, "  %s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Status.Discovered, device.Status.Healthy)
+	}
+	return writer.Flush()
 }
 
 func newPoolDeleteCommand(options *commandOptions) *cobra.Command {

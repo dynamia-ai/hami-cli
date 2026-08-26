@@ -321,6 +321,128 @@ func TestPoolListNameOutput(t *testing.T) {
 	}
 }
 
+func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a"},
+		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
+					Node: resourcepoolv1alpha1.NodeSchedulerPolicySpread,
+					GPU:  resourcepoolv1alpha1.GPUSchedulerPolicy("binpack,numa"),
+				},
+			},
+		},
+		Status: resourcepoolv1alpha1.ResourcePoolStatus{
+			DiscoveredDevices: 2,
+			HealthyDevices:    1,
+			Revision:          "inventory-7",
+		},
+	}
+	objects := []client.Object{
+		pool,
+		&resourcepoolv1alpha1.ResourcePoolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "training-a", Namespace: "team-b"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionFalse},
+			}},
+		},
+		&resourcepoolv1alpha1.ResourcePoolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "training-a", Namespace: "team-a"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionTrue},
+			}},
+		},
+		&resourcepoolv1alpha1.ResourcePoolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "unrelated-namespace"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "other"}},
+		},
+		&resourcepoolv1alpha1.GPUDevice{
+			ObjectMeta: metav1.ObjectMeta{Name: "device-b"},
+			Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-b", DeviceID: "GPU-B"},
+				PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+			},
+			Status: resourcepoolv1alpha1.GPUDeviceStatus{Discovered: true, Healthy: false},
+		},
+		&resourcepoolv1alpha1.GPUDevice{
+			ObjectMeta: metav1.ObjectMeta{Name: "device-a"},
+			Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceID: "GPU-A"},
+				PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
+			},
+			Status: resourcepoolv1alpha1.GPUDeviceStatus{Discovered: true, Healthy: true},
+		},
+		&resourcepoolv1alpha1.GPUDevice{
+			ObjectMeta: metav1.ObjectMeta{Name: "unrelated-device"},
+			Spec: resourcepoolv1alpha1.GPUDeviceSpec{
+				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-c", DeviceID: "GPU-C"},
+				PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: "other"},
+			},
+		},
+	}
+
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe error = %v", err)
+	}
+
+	want := "" +
+		"Name:                   training-a\n" +
+		"Node scheduler policy:  spread\n" +
+		"GPU scheduler policy:   binpack,numa\n" +
+		"Discovered devices:     2\n" +
+		"Healthy devices:        1\n" +
+		"Revision:               inventory-7\n" +
+		"\n" +
+		"Namespaces:\n" +
+		"  NAMESPACE  BINDING     BOUND\n" +
+		"  team-a     training-a  True\n" +
+		"  team-b     training-a  False\n" +
+		"\n" +
+		"Devices:\n" +
+		"  NAME      NODE    DEVICE-ID  DISCOVERED  HEALTHY\n" +
+		"  device-a  node-a  GPU-A      true        true\n" +
+		"  device-b  node-b  GPU-B      true        false\n"
+	if got := output.String(); got != want {
+		t.Fatalf("pool describe output = %q, want %q", got, want)
+	}
+}
+
+func TestPoolDescribeShowsEmptyAssociations(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "empty"}}
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe error = %v", err)
+	}
+	if got, want := output.String(), "Namespaces:\n  <none>\n\nDevices:\n  <none>\n"; !strings.Contains(got, want) {
+		t.Fatalf("pool describe empty associations = %q, want suffix %q", got, want)
+	}
+}
+
 func TestPoolDeleteForceRemovesOnlyTargetPoolReferences(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
