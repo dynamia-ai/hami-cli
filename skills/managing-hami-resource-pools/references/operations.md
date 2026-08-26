@@ -159,7 +159,7 @@ HAMI_POOL=training
 
 Before `pool create`, require the name to be absent. For a temporary lifecycle, exclude other writers for that pool name from the absence check through confirmed deletion. After a successful create, read and record the pool UID. An `AlreadyExists` or ambiguous create result does not establish ownership; do not later delete that pool without independent proof.
 
-The pool UID re-read is not an atomic delete precondition: `pool delete` deletes by name. If another actor can replace the pool before the UID is recorded or between the final read and delete, do not automate cleanup; current `hami-cli` cannot make that deletion ownership-safe.
+The pool UID re-read is not an atomic delete precondition for plain `pool delete`, which deletes by name. If another actor can replace the pool before the UID is recorded or between the final read and delete, do not automate temporary cleanup. The `--force` mode described below adds UID guards, but it is intended for destructive pool teardown rather than ownership-safe reversal of a temporary test.
 
 A newly created empty pool is correctly observed when its current generation has `Accepted=True`, zero discovered/healthy devices, and `Ready=False` with reason `NoHealthyDevices`. Do not wait for `Ready=True` until a healthy device has actually been assigned and discovered.
 
@@ -191,6 +191,16 @@ Run those commands only after their guards succeed:
 `--expected-uid` and `--expected-pool` must be used together. Omitting both retains the unguarded manual behavior and is not ownership-safe for temporary cleanup in a shared cluster.
 
 For an intentional permanent move, verify the requested final assignment instead of running temporary cleanup. If a planned workflow must restore a non-empty original pool, use `device assign --pool ORIGINAL_POOL` only after re-reading the same device UID and obtaining explicit authorization; never replace it with `unassign`.
+
+For an intentional teardown of a pool and all of its current references, use the explicit force mode:
+
+```bash
+"${HAMI[@]}" pool delete "$HAMI_POOL" --force
+```
+
+Force mode reads the target pool and both reference collections, revalidates that the pool still has the same UID, deletes every `ResourcePoolBinding` whose `spec.poolRef.name` matches it, clears the matching `GPUDevice.spec.poolRef` values and pool labels with optimistic patches, then requests deletion of the same pool UID. It can therefore clear late references that keep the same terminating pool behind reference protection. Unrelated bindings, devices, and pools are preserved. Plain `pool delete` retains the admission-protected behavior and does not clean references.
+
+This mode revokes future namespace access and GPU ownership in one command, but it does not evict existing Pods or delete workloads. It stops on the first cleanup failure and does not request pool deletion, while cleanup operations that already succeeded are not rolled back. After any error, re-read the complete binding and device maps before deciding whether to retry.
 
 After `pool delete`, use bounded condition polling on `pool list -o name` until the pool is absent. A finalizer may intentionally retain the object while references settle. If the bound expires, capture the terminating object from `pool list -o yaml` and report the remaining finalizer/reference state; do not patch finalizers away.
 
