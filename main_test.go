@@ -170,7 +170,7 @@ func TestDeviceListTableAlignsLongValues(t *testing.T) {
 	}
 }
 
-func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
+func TestPoolBindingsListsOnlyTargetPoolAcrossNamespaces(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
@@ -178,77 +178,127 @@ func TestBindingListHonorsNamespaceAndAllNamespaces(t *testing.T) {
 	}
 	objects := []client.Object{
 		&resourcepoolv1alpha1.ResourcePoolBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pool-b", Namespace: "team-b"},
-			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-b"}},
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-b"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-a"}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionFalse},
+			}},
 		},
 		&resourcepoolv1alpha1.ResourcePoolBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a"},
 			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-a"}},
+			Status: resourcepoolv1alpha1.ResourcePoolBindingStatus{Conditions: []metav1.Condition{
+				{Type: "Bound", Status: metav1.ConditionTrue},
+			}},
+		},
+		&resourcepoolv1alpha1.ResourcePoolBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-b", Namespace: "team-c"},
+			Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: "pool-b"}},
 		},
 	}
 	newOptions := func() (*commandOptions, *bytes.Buffer) {
 		output := &bytes.Buffer{}
-		overrides := &clientcmd.ConfigOverrides{}
-		rawConfig := clientcmdapi.Config{
-			CurrentContext: "test",
-			Contexts: map[string]*clientcmdapi.Context{
-				"test": {Namespace: "default"},
-			},
-		}
 		return &commandOptions{
-			overrides:    overrides,
-			clientConfig: clientcmd.NewDefaultClientConfig(rawConfig, overrides),
-			client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
-			out:          output,
-			errOut:       output,
+			client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+			out:    output,
+			errOut: output,
 		}, output
 	}
 
 	options, output := newOptions()
 	command := newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--namespace", "team-a", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "pool-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("namespaced binding list error = %v", err)
+		t.Fatalf("pool bindings table error = %v", err)
 	}
-	if got, want := strings.TrimSpace(output.String()), "resourcepoolbinding.resource.hami.io/pool-a"; got != want {
-		t.Fatalf("namespaced binding list = %q, want %q", got, want)
+	wantTable := "" +
+		"NAMESPACE  BINDING  BOUND\n" +
+		"team-a     pool-a   True\n" +
+		"team-b     pool-a   False\n"
+	if got := output.String(); got != wantTable {
+		t.Fatalf("pool bindings table = %q, want %q", got, wantTable)
 	}
 
 	options, output = newOptions()
 	command = newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--all-namespaces", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "pool-a", "-o", "json"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("all-namespaces binding list error = %v", err)
+		t.Fatalf("structured pool bindings error = %v", err)
 	}
-	if got, want := output.String(), "resourcepoolbinding.resource.hami.io/pool-a\nresourcepoolbinding.resource.hami.io/pool-b\n"; got != want {
-		t.Fatalf("all-namespaces binding list = %q, want %q", got, want)
+	bindings := &resourcepoolv1alpha1.ResourcePoolBindingList{}
+	if err := json.Unmarshal(output.Bytes(), bindings); err != nil {
+		t.Fatalf("decode pool bindings JSON: %v", err)
 	}
-
-	conflicts := [][]string{
-		{"binding", "list", "--namespace", "team-a", "--all-namespaces"},
-		{"binding", "ls", "-n", "team-a", "-A"},
+	if len(bindings.Items) != 2 {
+		t.Fatalf("pool bindings = %d, want 2", len(bindings.Items))
 	}
-	for _, args := range conflicts {
-		options, _ = newOptions()
-		command = newRootCommand(options)
-		command.SetArgs(args)
-		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
-			t.Errorf("%v error = %v, want namespace conflict rejection", args, err)
+	for i, namespace := range []string{"team-a", "team-b"} {
+		if bindings.Items[i].Namespace != namespace || bindings.Items[i].Spec.PoolRef.Name != "pool-a" {
+			t.Errorf("pool binding %d = %s/%s -> %s, want namespace %s and pool-a", i, bindings.Items[i].Namespace, bindings.Items[i].Name, bindings.Items[i].Spec.PoolRef.Name, namespace)
 		}
 	}
 
 	options, output = newOptions()
 	command = newRootCommand(options)
-	command.SetArgs([]string{"binding", "list", "--namespace", "team-a", "--all-namespaces=false", "-o", "name"})
+	command.SetArgs([]string{"pool", "bindings", "-A"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("explicit false all-namespaces error = %v", err)
+		t.Fatalf("all-pools bindings table error = %v", err)
 	}
-	if got, want := strings.TrimSpace(output.String()), "resourcepoolbinding.resource.hami.io/pool-a"; got != want {
-		t.Fatalf("explicit false all-namespaces result = %q, want %q", got, want)
+	wantAllTable := "" +
+		"NAMESPACE  BINDING  POOL    BOUND\n" +
+		"team-a     pool-a   pool-a  True\n" +
+		"team-b     pool-a   pool-a  False\n" +
+		"team-c     pool-b   pool-b  Unknown\n"
+	if got := output.String(); got != wantAllTable {
+		t.Fatalf("all-pools bindings table = %q, want %q", got, wantAllTable)
 	}
 }
 
-func TestBindAndUnbindAreRootCommands(t *testing.T) {
+func TestPoolBindingsRequiresNameOrAllPools(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing selection",
+			args: []string{"pool", "bindings"},
+			want: "either NAME or --all-pools must be specified",
+		},
+		{
+			name: "conflicting selection",
+			args: []string{"pool", "bindings", "pool-a", "-A"},
+			want: "NAME cannot be combined with --all-pools",
+		},
+		{
+			name: "target pool with namespace",
+			args: []string{"pool", "bindings", "pool-a", "--namespace", "team-a"},
+			want: "--namespace cannot be used with pool bindings",
+		},
+		{
+			name: "all pools with namespace",
+			args: []string{"pool", "bindings", "-A", "-n", "team-a"},
+			want: "--namespace cannot be used with pool bindings",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    &bytes.Buffer{},
+				errOut: &bytes.Buffer{},
+			})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("pool bindings error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPoolBindAndUnbindReplaceRootBindingCommands(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
@@ -273,9 +323,9 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	}
 
 	command := newRootCommand(newOptions())
-	command.SetArgs([]string{"bind", "--namespace", "team-a", "--pool", "training-a"})
+	command.SetArgs([]string{"pool", "bind", "training-a", "--namespace", "team-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("root bind error = %v", err)
+		t.Fatalf("pool bind error = %v", err)
 	}
 	binding := &resourcepoolv1alpha1.ResourcePoolBinding{}
 	key := client.ObjectKey{Name: "training-a", Namespace: "team-a"}
@@ -284,18 +334,24 @@ func TestBindAndUnbindAreRootCommands(t *testing.T) {
 	}
 
 	command = newRootCommand(newOptions())
-	command.SetArgs([]string{"unbind", "--namespace", "team-a", "--pool", "training-a"})
+	command.SetArgs([]string{"pool", "unbind", "training-a", "--namespace", "team-a"})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("root unbind error = %v", err)
+		t.Fatalf("pool unbind error = %v", err)
 	}
 	if err := cli.Get(t.Context(), key, binding); !apierrors.IsNotFound(err) {
 		t.Fatalf("get deleted binding error = %v, want NotFound", err)
 	}
 
-	command = newRootCommand(newOptions())
-	command.SetArgs([]string{"binding", "bind", "--pool", "training-a"})
-	if err := command.Execute(); err == nil {
-		t.Fatal("nested binding bind succeeded, want rejected route")
+	for _, args := range [][]string{
+		{"binding", "list"},
+		{"bind", "--pool", "training-a"},
+		{"unbind", "--pool", "training-a"},
+	} {
+		command = newRootCommand(newOptions())
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Errorf("removed root route %v succeeded, want rejected", args)
+		}
 	}
 }
 

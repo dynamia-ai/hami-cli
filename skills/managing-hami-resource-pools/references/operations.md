@@ -13,7 +13,7 @@ HAMI=(hami-cli --context "$HAMI_CONTEXT" --request-timeout 20s)
 "${HAMI[@]}" version
 "${HAMI[@]}" pool list -o json
 "${HAMI[@]}" device list -o json
-"${HAMI[@]}" binding list -A -o json
+"${HAMI[@]}" pool bindings -A -o json
 ```
 
 Record at least these stable baseline mappings:
@@ -59,7 +59,7 @@ docker run --rm \
   --request-timeout 20s \
   --server "https://host.docker.internal:${HAMI_API_PORT}" \
   --tls-server-name "$HAMI_TLS_SERVER_NAME" \
-  binding list --all-namespaces -o json
+  pool bindings -A -o json
 ```
 
 Take `HAMI_TLS_SERVER_NAME` from the selected kubeconfig cluster's `tls-server-name`, or from the original name covered by the certificate's Subject Alternative Names. Never replace correct server identity with `--insecure-skip-tls-verify`. Linux Docker may additionally require `--add-host host.docker.internal:host-gateway`.
@@ -90,20 +90,30 @@ HAMI_POOL=training
 "${HAMI[@]}" pool describe "$HAMI_POOL"
 ```
 
-`pool describe` matches associations by `spec.poolRef.name` across all namespaces. It is a human-readable convenience view; retain the structured list commands from the baseline when the result is audit evidence or input to automation.
+`pool describe` matches associations by `spec.poolRef.name` across all namespaces. It is a human-readable convenience view; retain structured `pool bindings` output when the result is audit evidence or input to automation.
 
 List every namespace-to-pool relationship:
 
 ```bash
-"${HAMI[@]}" binding list --all-namespaces
-"${HAMI[@]}" binding list --all-namespaces -o json
+"${HAMI[@]}" pool bindings -A
+"${HAMI[@]}" pool bindings --all-pools -o json
 ```
 
-List one namespace only when its existence and intended use are already known:
+List every namespace relationship for the target pool:
+
+```bash
+"${HAMI[@]}" pool bindings "$HAMI_POOL"
+"${HAMI[@]}" pool bindings "$HAMI_POOL" -o json
+```
+
+`pool bindings` always spans namespaces and rejects an explicit `--namespace`.
+When only one namespace is relevant, filter the structured result without
+changing the cluster query scope:
 
 ```bash
 HAMI_NAMESPACE=team-a
-"${HAMI[@]}" binding list --namespace "$HAMI_NAMESPACE" -o json
+"${HAMI[@]}" pool bindings "$HAMI_POOL" -o json |
+  jq --arg namespace "$HAMI_NAMESPACE" '{items: [.items[] | select(.metadata.namespace == $namespace)]}'
 ```
 
 A relationship is controller-confirmed when the object has the expected namespace/name/pool, `status.observedGeneration` matches `metadata.generation`, and its current `Bound` condition is `True`.
@@ -125,7 +135,7 @@ spec:
 
 ```bash
 "${HAMI[@]}" apply -f binding.yaml
-"${HAMI[@]}" binding list --namespace team-a -o json
+"${HAMI[@]}" pool bindings training -o json
 ```
 
 The binding name must equal `spec.poolRef.name`. If the manifest omits its namespace, kubeconfig or `--namespace` supplies it. An explicit manifest namespace that conflicts with an explicit CLI namespace is rejected. Server-Side Apply conflicts are ownership evidence; do not delete/recreate or force ownership.
@@ -135,8 +145,8 @@ The manifest may omit `metadata.labels`: `hami-cli apply` injects the required `
 Revoke future access with:
 
 ```bash
-"${HAMI[@]}" unbind --namespace team-a --pool training
-"${HAMI[@]}" binding list --namespace team-a -o json
+"${HAMI[@]}" pool unbind training --namespace team-a
+"${HAMI[@]}" pool bindings training -o json
 ```
 
 Success requires the target relationship to be absent after the delete. Existing Pods may continue running.
@@ -145,15 +155,15 @@ Success requires the target relationship to be absent after the delete. Existing
 
 For a create-test-delete cycle, do not adopt an existing object:
 
-1. Read the namespace and all-namespace binding lists and require the target to be absent.
-2. Run `bind --namespace NAMESPACE --pool POOL` once.
+1. Read `pool bindings POOL -o json` and require the target namespace relationship to be absent.
+2. Run `pool bind POOL --namespace NAMESPACE` once.
 3. Read the object, record its UID, and wait for the current generation to become `Bound=True`.
 4. Exclude concurrent binding writers for the cleanup window; immediately before cleanup, re-read and require the same UID.
-5. Run `unbind`, prove absence, and compare the complete relationship map with the baseline.
+5. Run `pool unbind POOL --namespace NAMESPACE`, prove absence, and compare the pool relationship map with the baseline.
 
-If `bind` returns `AlreadyExists` or times out ambiguously, re-read state and do not delete the object unless ownership is independently proven.
+If `pool bind` returns `AlreadyExists` or times out ambiguously, re-read state and do not delete the object unless ownership is independently proven.
 
-The UID re-read detects earlier replacement but is not an atomic delete precondition: `unbind` deletes by namespace/name. If another actor can replace the object between the read and delete, do not automate cleanup; current `hami-cli` cannot make that deletion ownership-safe.
+The UID re-read detects earlier replacement but is not an atomic delete precondition: `pool unbind` deletes by namespace/name. If another actor can replace the object between the read and delete, do not automate cleanup; current `hami-cli` cannot make that deletion ownership-safe.
 
 ## Manage pool and device ownership
 
@@ -198,7 +208,7 @@ Before assignment, record the device UID, pool reference, discovery/health statu
 If the lifecycle includes a temporary binding, create it through the temporary relationship workflow and record its UID. Clean up only writes whose ownership and original state were recorded:
 
 ```bash
-"${HAMI[@]}" unbind --namespace team-a --pool "$HAMI_POOL"
+"${HAMI[@]}" pool unbind "$HAMI_POOL" --namespace team-a
 "${HAMI[@]}" device unassign GPUDEVICE_NAME \
   --expected-uid "$HAMI_DEVICE_UID" \
   --expected-pool "$HAMI_POOL"
@@ -262,7 +272,7 @@ For example, verify a temporary binding with its recorded UID:
 ```bash
 HAMI_BINDING_VERIFIED=false
 for HAMI_ATTEMPT in {1..30}; do
-  if HAMI_BINDINGS=$("${HAMI[@]}" binding list --namespace "$HAMI_NAMESPACE" -o json) &&
+  if HAMI_BINDINGS=$("${HAMI[@]}" pool bindings "$HAMI_POOL" -o json) &&
     jq -e --arg pool "$HAMI_POOL" --arg uid "$HAMI_BINDING_UID" '
       any(.items[];
         .metadata.name == $pool and
@@ -295,7 +305,7 @@ An expired bound is an unverified result. Stop forward mutation, run only owners
 
 | Symptom | Meaning and action |
 | --- | --- |
-| `AlreadyExists` from `bind` | The create-only command did not converge. Re-read; use `apply` only for an object the caller owns. |
+| `AlreadyExists` from `pool bind` | The create-only command did not converge. Re-read; use `apply` only for an object the caller owns. |
 | `NotFound` for resource types | The target cluster lacks the resource-pool CRDs or API discovery is failing. The CLI does not install them. |
 | `forbidden` | RBAC or admission denied the operation. Report the exact verb/resource/namespace; do not bypass policy. |
 | Server-Side Apply conflict | Another manager owns a requested field. Preserve that ownership unless the user explicitly authorizes a takeover path. |
