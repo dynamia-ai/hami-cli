@@ -24,7 +24,7 @@ Use this skill for audits, namespace access, pool lifecycle, GPU ownership, clea
    - User-owned desired state: use `apply` so an identical manifest is rerunnable.
    - Temporary test relation: require absence, use `bind`, record its UID, exclude concurrent writers, and re-check the UID immediately before `unbind`.
    - GPU move: proceed only with explicit authorization and current device/allocation evidence. For temporary cleanup, record the device UID and use `device unassign` with both `--expected-uid` and `--expected-pool`.
-4. Mutate the smallest object set. Prefer `bind`/`unbind`, `device assign`/`device unassign`, and `pool create`/`pool delete` over hand-edited manifests. Use `pool delete --force` only for an intentional pool teardown that should also remove every binding and device assignment referencing that pool.
+4. Mutate the smallest object set. Prefer `bind`/`unbind`, `device assign`/`device unassign`, and `pool create`/`pool update`/`pool delete` over hand-edited manifests. Use `pool delete --force` only for an intentional pool teardown that should also remove every binding and device assignment referencing that pool.
 5. Verify controller-observed state. For temporary changes, clean up in reverse reference order and compare final maps with the baseline; for persistent changes, prove the intended delta and unchanged unrelated state.
 
 Read [references/operations.md](references/operations.md) before executing mutations or diagnosing failures.

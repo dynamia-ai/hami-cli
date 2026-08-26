@@ -124,6 +124,7 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 	command.AddCommand(
 		list,
 		newPoolDescribeCommand(options),
+		newPoolUpdateCommand(options),
 		&cobra.Command{
 			Use:   "create NAME",
 			Short: "Create an empty resource pool",
@@ -148,6 +149,98 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 		newPoolDeleteCommand(options),
 	)
 	return command
+}
+
+func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
+	var nodePolicy string
+	var gpuPolicy string
+	command := &cobra.Command{
+		Use:   "update NAME",
+		Short: "Update workload scheduling defaults for a resource pool",
+		Args:  cobra.ExactArgs(1),
+		PreRunE: func(command *cobra.Command, _ []string) error {
+			nodeChanged := command.Flags().Changed("node-scheduler-policy")
+			gpuChanged := command.Flags().Changed("gpu-scheduler-policy")
+			if !nodeChanged && !gpuChanged {
+				return errors.New("at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified")
+			}
+			if nodeChanged {
+				if err := validateNodeSchedulerPolicy(nodePolicy); err != nil {
+					return err
+				}
+			}
+			if gpuChanged {
+				if err := validateGPUSchedulerPolicy(gpuPolicy); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		RunE: func(command *cobra.Command, args []string) error {
+			cli, err := options.getClient()
+			if err != nil {
+				return err
+			}
+			poolName := args[0]
+			pool := &resourcepoolv1alpha1.ResourcePool{}
+			if err := cli.Get(command.Context(), client.ObjectKey{Name: poolName}, pool); err != nil {
+				return fmt.Errorf("get resource pool %q: %w", poolName, err)
+			}
+
+			base := pool.DeepCopy()
+			if pool.Spec.WorkloadDefaults == nil {
+				pool.Spec.WorkloadDefaults = &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{}
+			}
+			if pool.Spec.WorkloadDefaults.SchedulingPolicy == nil {
+				pool.Spec.WorkloadDefaults.SchedulingPolicy = &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{}
+			}
+			policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
+			if command.Flags().Changed("node-scheduler-policy") {
+				policy.Node = resourcepoolv1alpha1.NodeSchedulerPolicy(nodePolicy)
+			}
+			if command.Flags().Changed("gpu-scheduler-policy") {
+				policy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicy(gpuPolicy)
+			}
+
+			if err := cli.Patch(command.Context(), pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				return fmt.Errorf("update resource pool %q: %w", poolName, err)
+			}
+			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s updated\n", poolName)
+			return nil
+		},
+	}
+	command.Flags().StringVar(&nodePolicy, "node-scheduler-policy", "", "Node scheduling policy: binpack or spread")
+	command.Flags().StringVar(&gpuPolicy, "gpu-scheduler-policy", "", "Ordered, comma-separated GPU policies: binpack, spread, topology-aware, mutex, or numa")
+	return command
+}
+
+func validateNodeSchedulerPolicy(policy string) error {
+	switch resourcepoolv1alpha1.NodeSchedulerPolicy(policy) {
+	case resourcepoolv1alpha1.NodeSchedulerPolicyBinpack, resourcepoolv1alpha1.NodeSchedulerPolicySpread:
+		return nil
+	default:
+		return fmt.Errorf("invalid node scheduler policy %q; must be binpack or spread", policy)
+	}
+}
+
+func validateGPUSchedulerPolicy(policy string) error {
+	validPolicies := map[resourcepoolv1alpha1.GPUSchedulerPolicy]struct{}{
+		resourcepoolv1alpha1.GPUSchedulerPolicyBinpack:       {},
+		resourcepoolv1alpha1.GPUSchedulerPolicySpread:        {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware: {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyMutex:         {},
+		resourcepoolv1alpha1.GPUSchedulerPolicyNUMA:          {},
+	}
+	for policyPart := range strings.SplitSeq(policy, ",") {
+		if _, ok := validPolicies[resourcepoolv1alpha1.GPUSchedulerPolicy(policyPart)]; !ok {
+			return fmt.Errorf(
+				"invalid GPU scheduler policy %q in %q; must be binpack, spread, topology-aware, mutex, or numa",
+				policyPart,
+				policy,
+			)
+		}
+	}
+	return nil
 }
 
 func newPoolDescribeCommand(options *commandOptions) *cobra.Command {

@@ -166,6 +166,20 @@ HAMI_POOL=training
 "${HAMI[@]}" device list -o json
 ```
 
+Set or change the pool defaults applied to workloads that do not already carry
+the corresponding scheduler annotations:
+
+```bash
+"${HAMI[@]}" pool update "$HAMI_POOL" \
+  --node-scheduler-policy spread \
+  --gpu-scheduler-policy topology-aware,mutex
+"${HAMI[@]}" pool describe "$HAMI_POOL"
+```
+
+Either scheduler-policy flag may be used on its own. The update preserves the
+other policy and rejects a concurrent ResourcePool change instead of
+overwriting it.
+
 Before `pool create`, require the name to be absent. For a temporary lifecycle, exclude other writers for that pool name from the absence check through confirmed deletion. After a successful create, read and record the pool UID. An `AlreadyExists` or ambiguous create result does not establish ownership; do not later delete that pool without independent proof.
 
 The pool UID re-read is not an atomic delete precondition for plain `pool delete`, which deletes by name. If another actor can replace the pool before the UID is recorded or between the final read and delete, do not automate temporary cleanup. The `--force` mode described below adds UID guards, but it is intended for destructive pool teardown rather than ownership-safe reversal of a temporary test.

@@ -321,6 +321,181 @@ func TestPoolListNameOutput(t *testing.T) {
 	}
 }
 
+func TestPoolUpdateChangesOnlyRequestedSchedulingPolicies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		args     []string
+		wantNode resourcepoolv1alpha1.NodeSchedulerPolicy
+		wantGPU  resourcepoolv1alpha1.GPUSchedulerPolicy
+	}{
+		{
+			name:     "node policy",
+			args:     []string{"--node-scheduler-policy", "spread"},
+			wantNode: resourcepoolv1alpha1.NodeSchedulerPolicySpread,
+			wantGPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+		},
+		{
+			name:     "GPU policies",
+			args:     []string{"--gpu-scheduler-policy", "topology-aware,mutex"},
+			wantNode: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+			wantGPU:  resourcepoolv1alpha1.GPUSchedulerPolicy("topology-aware,mutex"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			scheme := runtime.NewScheme()
+			if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			pool := &resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a", Labels: map[string]string{"owner": "platform"}},
+				Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+					WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+						SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
+							Node: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+							GPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+						},
+					},
+				},
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+			command.SetArgs(append([]string{"pool", "update", pool.Name}, test.args...))
+			if err := command.Execute(); err != nil {
+				t.Fatalf("pool update error = %v", err)
+			}
+
+			updated := &resourcepoolv1alpha1.ResourcePool{}
+			if err := cli.Get(t.Context(), client.ObjectKey{Name: pool.Name}, updated); err != nil {
+				t.Fatalf("get updated pool: %v", err)
+			}
+			policy := updated.Spec.WorkloadDefaults.SchedulingPolicy
+			if policy.Node != test.wantNode || policy.GPU != test.wantGPU {
+				t.Fatalf("updated policy = %#v, want node %q and GPU %q", policy, test.wantNode, test.wantGPU)
+			}
+			if updated.Labels["owner"] != "platform" {
+				t.Fatalf("updated labels = %#v, want unrelated label preserved", updated.Labels)
+			}
+			if got, want := output.String(), "resourcepool.resource.hami.io/training-a updated\n"; got != want {
+				t.Fatalf("pool update output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "no policy flags",
+			args: []string{"pool", "update", "training-a"},
+			want: "at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified",
+		},
+		{
+			name: "invalid node policy",
+			args: []string{"pool", "update", "training-a", "--node-scheduler-policy", "random"},
+			want: `invalid node scheduler policy "random"`,
+		},
+		{
+			name: "invalid GPU policy",
+			args: []string{"pool", "update", "training-a", "--gpu-scheduler-policy", "topology-aware,exclusive"},
+			want: `invalid GPU scheduler policy "exclusive"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    &bytes.Buffer{},
+				errOut: &bytes.Buffer{},
+			})
+			command.SetArgs(test.args)
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("pool update error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPoolUpdateRejectsConcurrentResourcePoolChange(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", ResourceVersion: "7"},
+		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
+					Node: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack,
+					GPU:  resourcepoolv1alpha1.GPUSchedulerPolicyNUMA,
+				},
+			},
+		},
+	}
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, _ client.WithWatch, object client.Object, patch client.Patch, _ ...client.PatchOption) error {
+			data, err := patch.Data(object)
+			if err != nil {
+				t.Fatalf("encode optimistic patch: %v", err)
+			}
+			optimistic := make(map[string]any)
+			if err := sigsyaml.Unmarshal(data, &optimistic); err != nil {
+				t.Fatalf("decode optimistic patch: %v", err)
+			}
+			resourceVersion, found, err := unstructured.NestedString(optimistic, "metadata", "resourceVersion")
+			if err != nil || !found || resourceVersion != "7" {
+				t.Fatalf("optimistic patch resourceVersion = %q, found = %v, error = %v", resourceVersion, found, err)
+			}
+			nodePolicy, found, err := unstructured.NestedString(optimistic, "spec", "workloadDefaults", "schedulingPolicy", "node")
+			if err != nil || !found || nodePolicy != "spread" {
+				t.Fatalf("optimistic patch node policy = %q, found = %v, error = %v", nodePolicy, found, err)
+			}
+			if gpuPolicy, found, err := unstructured.NestedString(optimistic, "spec", "workloadDefaults", "schedulingPolicy", "gpu"); err != nil || found {
+				t.Fatalf("optimistic patch GPU policy = %q, found = %v, error = %v; want omitted", gpuPolicy, found, err)
+			}
+			if _, found, err := unstructured.NestedMap(optimistic, "metadata", "labels"); err != nil || found {
+				t.Fatalf("optimistic patch labels found = %v, error = %v; want omitted", found, err)
+			}
+
+			latest := pool.DeepCopy()
+			latest.Labels = map[string]string{"concurrent": "preserved"}
+			latest.Spec.WorkloadDefaults.SchedulingPolicy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware
+			if err := baseClient.Update(ctx, latest); err != nil {
+				t.Fatalf("simulate concurrent pool update: %v", err)
+			}
+			return apierrors.NewConflict(
+				resourcepoolv1alpha1.GroupVersion.WithResource("resourcepools").GroupResource(),
+				object.GetName(),
+				fmt.Errorf("changed concurrently"),
+			)
+		},
+	})
+	command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "update", pool.Name, "--node-scheduler-policy", "spread"})
+	err := command.Execute()
+	if err == nil || !apierrors.IsConflict(err) || !strings.Contains(err.Error(), `update resource pool "training-a"`) {
+		t.Fatalf("pool update error = %v, want wrapped conflict", err)
+	}
+	updated := &resourcepoolv1alpha1.ResourcePool{}
+	if err := baseClient.Get(t.Context(), client.ObjectKey{Name: pool.Name}, updated); err != nil {
+		t.Fatalf("get concurrently updated pool: %v", err)
+	}
+	if updated.Labels["concurrent"] != "preserved" || updated.Spec.WorkloadDefaults.SchedulingPolicy.GPU != resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware {
+		t.Fatalf("concurrent pool state = %#v, want label and GPU policy preserved", updated)
+	}
+}
+
 func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
