@@ -318,7 +318,7 @@ func (options *commandOptions) waitForPoolQuotaCurrent(
 
 		lastState = quotaWaitState(pool)
 		if pool.Spec.Quota == nil {
-			return pool.Status.Quota == nil, nil
+			return pool.Status.Quota == nil && pool.Status.ObservedGeneration == expectedGeneration, nil
 		}
 		return pool.Status.Quota != nil && pool.Status.Quota.ObservedGeneration == expectedGeneration, nil
 	})
@@ -332,8 +332,13 @@ func (options *commandOptions) waitForPoolQuotaCurrent(
 }
 
 func quotaWaitState(pool *resourcepoolv1alpha1.ResourcePool) string {
-	if pool.Spec.Quota == nil && pool.Status.Quota != nil {
-		return fmt.Sprintf("pending removal (status observed generation %d, current generation %d)", pool.Status.Quota.ObservedGeneration, pool.Generation)
+	if pool.Spec.Quota == nil {
+		if pool.Status.Quota != nil {
+			return fmt.Sprintf("pending removal (status observed generation %d, current generation %d)", pool.Status.Quota.ObservedGeneration, pool.Generation)
+		}
+		if pool.Status.ObservedGeneration != pool.Generation {
+			return fmt.Sprintf("pending (resource pool status observed generation %d, current generation %d)", pool.Status.ObservedGeneration, pool.Generation)
+		}
 	}
 	if state := quotaLedgerState(pool); state != "" {
 		return state
