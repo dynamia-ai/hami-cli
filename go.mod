@@ -1,6 +1,6 @@
 module github.com/dynamia-ai/hami-cli
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260826060623-701f7b961ad0
