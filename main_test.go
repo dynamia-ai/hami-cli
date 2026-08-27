@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
@@ -18,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8swait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -196,6 +199,10 @@ func TestPoolQuotaHelpDescribesLimitCeilings(t *testing.T) {
 			want: []string{
 				"Aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
 				"Aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
+				"--wait-for-current",
+				"Wait for quota status to reflect the updated ResourcePool generation",
+				"--wait-timeout duration",
+				"Maximum total time to wait for quota status after updating",
 			},
 		},
 	} {
@@ -623,6 +630,16 @@ func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
 			args: []string{"pool", "update", "training-a", "--memory-quota", "-1Gi"},
 			want: "memory quota must not be negative",
 		},
+		{
+			name: "wait timeout without wait",
+			args: []string{"pool", "update", "training-a", "--cpu-quota", "1", "--wait-timeout", "5s"},
+			want: "--wait-timeout requires --wait-for-current",
+		},
+		{
+			name: "non-positive wait timeout",
+			args: []string{"pool", "update", "training-a", "--cpu-quota", "1", "--wait-for-current", "--wait-timeout", "0s"},
+			want: "--wait-timeout must be greater than zero",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -768,6 +785,313 @@ func TestPoolUpdateRejectsConcurrentResourcePoolChange(t *testing.T) {
 	}
 	if updated.Labels["concurrent"] != "preserved" || updated.Spec.WorkloadDefaults.SchedulingPolicy.GPU != resourcepoolv1alpha1.GPUSchedulerPolicyTopologyAware {
 		t.Fatalf("concurrent pool state = %#v, want label and GPU policy preserved", updated)
+	}
+}
+
+func TestPoolUpdateWaitsForQuotaStatusToObserveUpdatedGeneration(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("8")
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("pool-uid"), Generation: 1},
+		Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+		Status:     resourcepoolv1alpha1.ResourcePoolStatus{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 1}},
+	}
+	stale := pool.DeepCopy()
+	stale.Generation = 2
+	updatedCPU := apiresource.MustParse("16")
+	stale.Spec.Quota.CPU = &updatedCPU
+	current := stale.DeepCopy()
+	current.Status.Quota.ObservedGeneration = 2
+
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	getCalls := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			getCalls++
+			if getCalls == 1 {
+				return delegated.Get(ctx, key, object, opts...)
+			}
+			observed := stale
+			if getCalls > 2 {
+				observed = current
+			}
+			observed.DeepCopyInto(object.(*resourcepoolv1alpha1.ResourcePool))
+			return nil
+		},
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := delegated.Patch(ctx, object, patch, opts...); err != nil {
+				return err
+			}
+			object.SetGeneration(2)
+			return nil
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: cli, out: output, errOut: output,
+		quotaPoll: deterministicQuotaPoll(3),
+	})
+	command.SetArgs([]string{"pool", "update", pool.Name, "--cpu-quota", "16", "--wait-for-current"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool update wait error = %v, output = %q", err, output.String())
+	}
+	if getCalls != 3 {
+		t.Fatalf("resource pool reads = %d, want initial read plus stale and current observations", getCalls)
+	}
+	want := "resourcepool.resource.hami.io/training-a updated\n" +
+		"resourcepool.resource.hami.io/training-a quota status current\n"
+	if output.String() != want {
+		t.Fatalf("pool update wait output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestPoolUpdateWaitsForRemovedQuotaStatusToClear(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("8")
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("pool-uid"), Generation: 1},
+		Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+		Status:     resourcepoolv1alpha1.ResourcePoolStatus{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 1}},
+	}
+	pendingRemoval := pool.DeepCopy()
+	pendingRemoval.Generation = 2
+	pendingRemoval.Spec.Quota = nil
+	pendingRemoval.Status.Quota.ObservedGeneration = 2
+	current := pendingRemoval.DeepCopy()
+	current.Status.Quota = nil
+	current.Status.ObservedGeneration = 2
+
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	getCalls := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			getCalls++
+			if getCalls == 1 {
+				return delegated.Get(ctx, key, object, opts...)
+			}
+			observed := pendingRemoval
+			if getCalls > 2 {
+				observed = current
+			}
+			observed.DeepCopyInto(object.(*resourcepoolv1alpha1.ResourcePool))
+			return nil
+		},
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := delegated.Patch(ctx, object, patch, opts...); err != nil {
+				return err
+			}
+			object.SetGeneration(2)
+			return nil
+		},
+	})
+	command := newRootCommand(&commandOptions{
+		client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{},
+		quotaPoll: deterministicQuotaPoll(3),
+	})
+	command.SetArgs([]string{"pool", "update", pool.Name, "--cpu-quota", "unlimited", "--wait-for-current"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool update quota removal wait error = %v", err)
+	}
+	if getCalls != 3 {
+		t.Fatalf("resource pool reads = %d, want initial read plus pending-removal and cleared observations", getCalls)
+	}
+}
+
+func TestPoolUpdateWaitsForUnquotaedGenerationObservation(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("8")
+	for _, test := range []struct {
+		name        string
+		initialSpec resourcepoolv1alpha1.ResourcePoolSpec
+		updatedSpec resourcepoolv1alpha1.ResourcePoolSpec
+		args        []string
+	}{
+		{
+			name:        "remove quota before its status exists",
+			initialSpec: resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+			updatedSpec: resourcepoolv1alpha1.ResourcePoolSpec{},
+			args:        []string{"--cpu-quota", "unlimited"},
+		},
+		{
+			name: "policy-only update without quota",
+			initialSpec: resourcepoolv1alpha1.ResourcePoolSpec{WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{Node: resourcepoolv1alpha1.NodeSchedulerPolicyBinpack},
+			}},
+			updatedSpec: resourcepoolv1alpha1.ResourcePoolSpec{WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{Node: resourcepoolv1alpha1.NodeSchedulerPolicySpread},
+			}},
+			args: []string{"--node-scheduler-policy", "spread"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("pool-uid"), Generation: 1},
+				Spec:       test.initialSpec,
+				Status:     resourcepoolv1alpha1.ResourcePoolStatus{ObservedGeneration: 1},
+			}
+			pending := pool.DeepCopy()
+			pending.Generation = 2
+			pending.Spec = test.updatedSpec
+			current := pending.DeepCopy()
+			current.Status.ObservedGeneration = 2
+
+			baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+			getCalls := 0
+			cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					getCalls++
+					if getCalls == 1 {
+						return delegated.Get(ctx, key, object, opts...)
+					}
+					observed := pending
+					if getCalls > 2 {
+						observed = current
+					}
+					observed.DeepCopyInto(object.(*resourcepoolv1alpha1.ResourcePool))
+					return nil
+				},
+				Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if err := delegated.Patch(ctx, object, patch, opts...); err != nil {
+						return err
+					}
+					object.SetGeneration(2)
+					return nil
+				},
+			})
+			command := newRootCommand(&commandOptions{
+				client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{},
+				quotaPoll: deterministicQuotaPoll(3),
+			})
+			command.SetArgs(append([]string{"pool", "update", pool.Name}, append(test.args, "--wait-for-current")...))
+			if err := command.Execute(); err != nil {
+				t.Fatalf("pool update wait error = %v", err)
+			}
+			if getCalls != 3 {
+				t.Fatalf("resource pool reads = %d, want initial read plus stale and current generation observations", getCalls)
+			}
+		})
+	}
+}
+
+func TestPoolUpdateWaitTimeoutReportsLastQuotaState(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("8")
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("pool-uid"), Generation: 1},
+		Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+		Status:     resourcepoolv1alpha1.ResourcePoolStatus{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 1}},
+	}
+	stale := pool.DeepCopy()
+	stale.Generation = 2
+	updatedCPU := apiresource.MustParse("16")
+	stale.Spec.Quota.CPU = &updatedCPU
+
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	getCalls := 0
+	cli := interceptor.NewClient(baseClient, interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			getCalls++
+			if getCalls == 1 {
+				return delegated.Get(ctx, key, object, opts...)
+			}
+			stale.DeepCopyInto(object.(*resourcepoolv1alpha1.ResourcePool))
+			return nil
+		},
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := delegated.Patch(ctx, object, patch, opts...); err != nil {
+				return err
+			}
+			object.SetGeneration(2)
+			return nil
+		},
+	})
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: cli, out: output, errOut: output,
+		quotaPoll: deterministicQuotaPoll(2),
+	})
+	command.SetArgs([]string{"pool", "update", pool.Name, "--cpu-quota", "16", "--wait-for-current", "--wait-timeout", "5s"})
+	err := command.Execute()
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "last state: stale (observed generation 1, current generation 2)") {
+		t.Fatalf("pool update wait error = %v, want deadline with last stale state", err)
+	}
+	if !strings.Contains(err.Error(), "wait up to 5s") {
+		t.Fatalf("pool update wait error = %v, want configured overall timeout", err)
+	}
+	if got, want := output.String(), "resourcepool.resource.hami.io/training-a updated\n"; got != want {
+		t.Fatalf("pool update wait output = %q, want only confirmed spec update %q", got, want)
+	}
+}
+
+func TestWaitForPoolQuotaCurrentRejectsReplacementOrLaterUpdate(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("16")
+	for _, test := range []struct {
+		name string
+		pool *resourcepoolv1alpha1.ResourcePool
+		want string
+	}{
+		{
+			name: "replacement",
+			pool: &resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("replacement-uid"), Generation: 2},
+				Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+				Status:     resourcepoolv1alpha1.ResourcePoolStatus{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 2}},
+			},
+			want: "was replaced while waiting for quota status",
+		},
+		{
+			name: "later update",
+			pool: &resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a", UID: types.UID("pool-uid"), Generation: 3},
+				Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu}},
+				Status:     resourcepoolv1alpha1.ResourcePoolStatus{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 3}},
+			},
+			want: "generation is 3, expected 2",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(test.pool).Build()
+			options := &commandOptions{quotaPoll: deterministicQuotaPoll(1)}
+			err := options.waitForPoolQuotaCurrent(t.Context(), cli, test.pool.Name, types.UID("pool-uid"), 2, 5*time.Second)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("wait error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func deterministicQuotaPoll(maxAttempts int) quotaPollFunc {
+	return func(ctx context.Context, _ time.Duration, _ time.Duration, _ bool, condition k8swait.ConditionWithContextFunc) error {
+		for range maxAttempts {
+			done, err := condition(ctx)
+			if err != nil || done {
+				return err
+			}
+		}
+		return context.DeadlineExceeded
 	}
 }
 

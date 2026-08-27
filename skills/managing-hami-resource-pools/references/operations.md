@@ -195,17 +195,26 @@ the corresponding scheduler annotations:
   --node-scheduler-policy spread \
   --gpu-scheduler-policy topology-aware,mutex \
   --cpu-quota 192 \
-  --memory-quota 768Gi
+  --memory-quota 768Gi \
+  --wait-for-current \
+  --wait-timeout 30s
 "${HAMI[@]}" pool describe "$HAMI_POOL"
 ```
 
 Any scheduler-policy or quota flag may be used on its own. The update preserves
 every omitted field and rejects a concurrent ResourcePool change instead of
-overwriting it. Remove one quota dimension explicitly without changing the
-other:
+overwriting it. `--wait-for-current` returns only after manager-owned quota
+status reflects the generation written by this update. Its `--wait-timeout` is
+an overall reconciliation deadline independent of the per-request
+`--request-timeout`. A later ResourcePool update or replacement makes the wait
+fail closed instead of treating another writer's generation as success.
+
+Remove one quota dimension explicitly without changing the other:
 
 ```bash
-"${HAMI[@]}" pool update "$HAMI_POOL" --cpu-quota unlimited
+"${HAMI[@]}" pool update "$HAMI_POOL" \
+  --cpu-quota unlimited \
+  --wait-for-current
 ```
 
 `pool describe` reports the configured ceilings and the manager-owned used and
@@ -298,7 +307,11 @@ The loop treats a list failure as unknown state rather than absence. Claim that 
 
 ## Verify bounded convergence
 
-`--request-timeout` bounds one API call, not controller reconciliation. For every write, use a separate overall deadline or bounded attempt count. Each attempt must first complete a successful structured read and then evaluate the expected predicate; read failures are unknown state, not success.
+`--request-timeout` bounds one API call, not controller reconciliation. For
+`pool update`, prefer `--wait-for-current` with a bounded `--wait-timeout`. For
+other writes, use a separate overall deadline or bounded attempt count. Each
+attempt must first complete a successful structured read and then evaluate the
+expected predicate; read failures are unknown state, not success.
 
 For example, verify a temporary binding with its recorded UID:
 
