@@ -186,16 +186,16 @@ func TestPoolQuotaHelpDescribesLimitCeilings(t *testing.T) {
 			name: "create",
 			args: []string{"pool", "create", "--help"},
 			want: []string{
-				"Optional aggregate CPU limit ceiling as a Kubernetes quantity",
-				"Optional aggregate memory limit ceiling as a Kubernetes quantity",
+				"Optional aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling",
+				"Optional aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling",
 			},
 		},
 		{
 			name: "update",
 			args: []string{"pool", "update", "--help"},
 			want: []string{
-				"Aggregate CPU limit ceiling as a Kubernetes quantity, or unlimited to remove it",
-				"Aggregate memory limit ceiling as a Kubernetes quantity, or unlimited to remove it",
+				"Aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
+				"Aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
 			},
 		},
 	} {

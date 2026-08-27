@@ -261,11 +261,11 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 }
 
 func addPoolQuotaFlags(command *cobra.Command, cpuQuota, memoryQuota *string, allowRemoval bool) {
-	cpuUsage := "Optional aggregate CPU limit ceiling as a Kubernetes quantity"
-	memoryUsage := "Optional aggregate memory limit ceiling as a Kubernetes quantity"
+	cpuUsage := "Optional aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling"
+	memoryUsage := "Optional aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling"
 	if allowRemoval {
-		cpuUsage = "Aggregate CPU limit ceiling as a Kubernetes quantity, or unlimited to remove it"
-		memoryUsage = "Aggregate memory limit ceiling as a Kubernetes quantity, or unlimited to remove it"
+		cpuUsage = "Aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit"
+		memoryUsage = "Aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit"
 	}
 	command.Flags().StringVar(cpuQuota, "cpu-quota", "", cpuUsage)
 	command.Flags().StringVar(memoryQuota, "memory-quota", "", memoryUsage)
