@@ -183,7 +183,9 @@ HAMI_POOL=training
 Both quota flags are optional and accept Kubernetes quantities. An omitted
 dimension is unlimited. Zero is a valid hard ceiling that rejects new non-zero
 usage; it does not mean unlimited. For every controlled dimension, admitted
-workload containers must declare equal, non-zero requests and limits.
+workload containers must declare a positive limit. Requests are optional and
+may differ from limits. The manager accounts quota usage and reservations from
+Pod limits.
 
 Set or change the pool defaults applied to workloads that do not already carry
 the corresponding scheduler annotations:

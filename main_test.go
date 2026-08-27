@@ -175,6 +175,49 @@ func TestPoolCreateSetsRequestedQuotas(t *testing.T) {
 	}
 }
 
+func TestPoolQuotaHelpDescribesLimitCeilings(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "create",
+			args: []string{"pool", "create", "--help"},
+			want: []string{
+				"Optional aggregate CPU limit ceiling as a Kubernetes quantity",
+				"Optional aggregate memory limit ceiling as a Kubernetes quantity",
+			},
+		},
+		{
+			name: "update",
+			args: []string{"pool", "update", "--help"},
+			want: []string{
+				"Aggregate CPU limit ceiling as a Kubernetes quantity, or unlimited to remove it",
+				"Aggregate memory limit ceiling as a Kubernetes quantity, or unlimited to remove it",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{out: output, errOut: output})
+			command.SetOut(output)
+			command.SetErr(output)
+			command.SetArgs(test.args)
+			if err := command.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(output.String(), want) {
+					t.Errorf("help output = %q, want substring %q", output.String(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestPoolCreateValidatesQuotaBeforeWriting(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
