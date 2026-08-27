@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8swait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -33,17 +35,26 @@ import (
 )
 
 type commandOptions struct {
-	loadingRules *clientcmd.ClientConfigLoadingRules
-	overrides    *clientcmd.ConfigOverrides
-	clientConfig clientcmd.ClientConfig
-	client       client.Client
-	out          io.Writer
-	errOut       io.Writer
-	executable   string
-	stdinTTY     bool
-	kitupHome    string
-	kitupCWD     string
+	loadingRules      *clientcmd.ClientConfigLoadingRules
+	overrides         *clientcmd.ConfigOverrides
+	clientConfig      clientcmd.ClientConfig
+	client            client.Client
+	out               io.Writer
+	errOut            io.Writer
+	executable        string
+	stdinTTY          bool
+	kitupHome         string
+	kitupCWD          string
+	quotaPoll         quotaPollFunc
+	quotaPollInterval time.Duration
 }
+
+type quotaPollFunc func(context.Context, time.Duration, time.Duration, bool, k8swait.ConditionWithContextFunc) error
+
+const (
+	defaultQuotaWaitTimeout  = 30 * time.Second
+	defaultQuotaPollInterval = 500 * time.Millisecond
+)
 
 func main() {
 	options := &commandOptions{
@@ -177,6 +188,8 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 	var gpuPolicy string
 	var cpuQuota string
 	var memoryQuota string
+	var waitForCurrent bool
+	var waitTimeout time.Duration
 	command := &cobra.Command{
 		Use:   "update NAME",
 		Short: "Update a resource pool's workload defaults and quotas",
@@ -186,6 +199,12 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 			gpuChanged := command.Flags().Changed("gpu-scheduler-policy")
 			if !nodeChanged && !gpuChanged && !command.Flags().Changed("cpu-quota") && !command.Flags().Changed("memory-quota") {
 				return errors.New("at least one scheduling-policy or quota flag must be specified")
+			}
+			if command.Flags().Changed("wait-timeout") && !waitForCurrent {
+				return errors.New("--wait-timeout requires --wait-for-current")
+			}
+			if waitForCurrent && waitTimeout <= 0 {
+				return errors.New("--wait-timeout must be greater than zero")
 			}
 			if nodeChanged {
 				if err := validateNodeSchedulerPolicy(nodePolicy); err != nil {
@@ -251,13 +270,75 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 				return fmt.Errorf("update resource pool %q: %w", poolName, err)
 			}
 			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s updated\n", poolName)
+			if waitForCurrent {
+				if err := options.waitForPoolQuotaCurrent(command.Context(), cli, poolName, pool.UID, pool.Generation, waitTimeout); err != nil {
+					return err
+				}
+				fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s quota status current\n", poolName)
+			}
 			return nil
 		},
 	}
 	command.Flags().StringVar(&nodePolicy, "node-scheduler-policy", "", "Node scheduling policy: binpack or spread")
 	command.Flags().StringVar(&gpuPolicy, "gpu-scheduler-policy", "", "Ordered, comma-separated GPU policies: binpack, spread, topology-aware, mutex, or numa")
 	addPoolQuotaFlags(command, &cpuQuota, &memoryQuota, true)
+	command.Flags().BoolVar(&waitForCurrent, "wait-for-current", false, "Wait for quota status to reflect the updated ResourcePool generation")
+	command.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultQuotaWaitTimeout, "Maximum total time to wait for quota status after updating")
 	return command
+}
+
+func (options *commandOptions) waitForPoolQuotaCurrent(
+	ctx context.Context,
+	cli client.Client,
+	poolName string,
+	expectedUID types.UID,
+	expectedGeneration int64,
+	timeout time.Duration,
+) error {
+	poll := options.quotaPoll
+	if poll == nil {
+		poll = k8swait.PollUntilContextTimeout
+	}
+	interval := options.quotaPollInterval
+	if interval <= 0 {
+		interval = defaultQuotaPollInterval
+	}
+	lastState := "not observed"
+	err := poll(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		pool := &resourcepoolv1alpha1.ResourcePool{}
+		if err := cli.Get(ctx, client.ObjectKey{Name: poolName}, pool); err != nil {
+			return false, fmt.Errorf("read resource pool %q while waiting for quota status: %w", poolName, err)
+		}
+		if expectedUID != "" && pool.UID != expectedUID {
+			return false, fmt.Errorf("resource pool %q was replaced while waiting for quota status: UID is %q, expected %q", poolName, pool.UID, expectedUID)
+		}
+		if pool.Generation != expectedGeneration {
+			return false, fmt.Errorf("resource pool %q changed while waiting for quota status: generation is %d, expected %d", poolName, pool.Generation, expectedGeneration)
+		}
+
+		lastState = quotaWaitState(pool)
+		if pool.Spec.Quota == nil {
+			return pool.Status.Quota == nil, nil
+		}
+		return pool.Status.Quota != nil && pool.Status.Quota.ObservedGeneration == expectedGeneration, nil
+	})
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("wait up to %s for resource pool %q quota status: %w (last state: %s)", timeout, poolName, err, lastState)
+	}
+	return fmt.Errorf("wait for resource pool %q quota status: %w", poolName, err)
+}
+
+func quotaWaitState(pool *resourcepoolv1alpha1.ResourcePool) string {
+	if pool.Spec.Quota == nil && pool.Status.Quota != nil {
+		return fmt.Sprintf("pending removal (status observed generation %d, current generation %d)", pool.Status.Quota.ObservedGeneration, pool.Generation)
+	}
+	if state := quotaLedgerState(pool); state != "" {
+		return state
+	}
+	return fmt.Sprintf("pending (current generation %d)", pool.Generation)
 }
 
 func addPoolQuotaFlags(command *cobra.Command, cpuQuota, memoryQuota *string, allowRemoval bool) {
