@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -96,9 +97,12 @@ func TestPoolListStructuredOutputPreservesExtensionFields(t *testing.T) {
 		"apiVersion": resourcepoolv1alpha1.GroupVersion.String(),
 		"kind":       "ResourcePool",
 		"metadata":   map[string]any{"name": "training-a"},
-		"spec": map[string]any{"workloadDefaults": map[string]any{
-			"schedulingPolicy": map[string]any{"node": "spread", "gpu": "binpack,numa"},
-		}},
+		"spec": map[string]any{
+			"quota": map[string]any{"cpu": "128", "memory": "512Gi"},
+			"workloadDefaults": map[string]any{
+				"schedulingPolicy": map[string]any{"node": "spread", "gpu": "binpack,numa"},
+			},
+		},
 	}}
 	cli := fake.NewClientBuilder().WithObjects(pool).Build()
 	for _, outputFormat := range []string{"json", "yaml"} {
@@ -120,6 +124,121 @@ func TestPoolListStructuredOutputPreservesExtensionFields(t *testing.T) {
 			node, found, err := unstructured.NestedString(listed.Items[0].Object, "spec", "workloadDefaults", "schedulingPolicy", "node")
 			if err != nil || !found || node != "spread" {
 				t.Fatalf("listed node policy = %q, found = %v, error = %v", node, found, err)
+			}
+			cpu, found, err := unstructured.NestedString(listed.Items[0].Object, "spec", "quota", "cpu")
+			if err != nil || !found || cpu != "128" {
+				t.Fatalf("listed CPU quota = %q, found = %v, error = %v", cpu, found, err)
+			}
+		})
+	}
+}
+
+func TestPoolCreateSetsRequestedQuotas(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+	command.SetArgs([]string{"pool", "create", "training-a", "--cpu-quota", "128", "--memory-quota", "512Gi"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool create error = %v", err)
+	}
+
+	pool := &resourcepoolv1alpha1.ResourcePool{}
+	if err := cli.Get(t.Context(), client.ObjectKey{Name: "training-a"}, pool); err != nil {
+		t.Fatalf("get created pool: %v", err)
+	}
+	if pool.Spec.Quota == nil || pool.Spec.Quota.CPU == nil || pool.Spec.Quota.CPU.Cmp(apiresource.MustParse("128")) != 0 {
+		t.Fatalf("created CPU quota = %#v, want 128", pool.Spec.Quota)
+	}
+	if pool.Spec.Quota.Memory == nil || pool.Spec.Quota.Memory.Cmp(apiresource.MustParse("512Gi")) != 0 {
+		t.Fatalf("created memory quota = %#v, want 512Gi", pool.Spec.Quota)
+	}
+	if got, want := output.String(), "resourcepool.resource.hami.io/training-a created\n"; got != want {
+		t.Fatalf("pool create output = %q, want %q", got, want)
+	}
+
+	command = newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+	command.SetArgs([]string{"pool", "create", "blocked", "--cpu-quota", "0"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool create with zero quota error = %v", err)
+	}
+	zeroPool := &resourcepoolv1alpha1.ResourcePool{}
+	if err := cli.Get(t.Context(), client.ObjectKey{Name: "blocked"}, zeroPool); err != nil {
+		t.Fatalf("get zero-quota pool: %v", err)
+	}
+	if zeroPool.Spec.Quota == nil || zeroPool.Spec.Quota.CPU == nil || !zeroPool.Spec.Quota.CPU.IsZero() {
+		t.Fatalf("created zero CPU quota = %#v, want explicit zero hard ceiling", zeroPool.Spec.Quota)
+	}
+}
+
+func TestPoolQuotaHelpDescribesLimitCeilings(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "create",
+			args: []string{"pool", "create", "--help"},
+			want: []string{
+				"Optional aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling",
+				"Optional aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling",
+			},
+		},
+		{
+			name: "update",
+			args: []string{"pool", "update", "--help"},
+			want: []string{
+				"Aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
+				"Aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			output := &bytes.Buffer{}
+			command := newRootCommand(&commandOptions{out: output, errOut: output})
+			command.SetOut(output)
+			command.SetErr(output)
+			command.SetArgs(test.args)
+			if err := command.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(output.String(), want) {
+					t.Errorf("help output = %q, want substring %q", output.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolCreateValidatesQuotaBeforeWriting(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "invalid CPU", args: []string{"--cpu-quota", "lots"}, want: `invalid CPU quota "lots"`},
+		{name: "negative memory", args: []string{"--memory-quota", "-1Gi"}, want: "memory quota must not be negative"},
+		{name: "create cannot remove quota", args: []string{"--cpu-quota", "unlimited"}, want: `CPU quota "unlimited" is only valid for pool update`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := newRootCommand(&commandOptions{
+				client: fake.NewClientBuilder().Build(),
+				out:    &bytes.Buffer{},
+				errOut: &bytes.Buffer{},
+			})
+			command.SetArgs(append([]string{"pool", "create", "training-a"}, test.args...))
+			if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("pool create error = %v, want substring %q", err, test.want)
 			}
 		})
 	}
@@ -377,6 +496,36 @@ func TestPoolListNameOutput(t *testing.T) {
 	}
 }
 
+func TestPoolListTableShowsQuotaLimits(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("128")
+	memory := apiresource.MustParse("512Gi")
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+			&resourcepoolv1alpha1.ResourcePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "training-a"},
+				Spec:       resourcepoolv1alpha1.ResourcePoolSpec{Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu, Memory: &memory}},
+			},
+			&resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "unlimited"}},
+		).Build(),
+		out: output, errOut: output,
+	})
+	command.SetArgs([]string{"pool", "list"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool list error = %v", err)
+	}
+	for _, value := range []string{"CPU-QUOTA", "MEMORY-QUOTA", "training-a", "128", "512Gi", "unlimited", "<unlimited>"} {
+		if !strings.Contains(output.String(), value) {
+			t.Errorf("pool list output = %q, want %q", output.String(), value)
+		}
+	}
+}
+
 func TestPoolUpdateChangesOnlyRequestedSchedulingPolicies(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -452,7 +601,7 @@ func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
 		{
 			name: "no policy flags",
 			args: []string{"pool", "update", "training-a"},
-			want: "at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified",
+			want: "at least one scheduling-policy or quota flag must be specified",
 		},
 		{
 			name: "invalid node policy",
@@ -463,6 +612,16 @@ func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
 			name: "invalid GPU policy",
 			args: []string{"pool", "update", "training-a", "--gpu-scheduler-policy", "topology-aware,exclusive"},
 			want: `invalid GPU scheduler policy "exclusive"`,
+		},
+		{
+			name: "invalid CPU quota",
+			args: []string{"pool", "update", "training-a", "--cpu-quota", "lots"},
+			want: `invalid CPU quota "lots"`,
+		},
+		{
+			name: "negative memory quota",
+			args: []string{"pool", "update", "training-a", "--memory-quota", "-1Gi"},
+			want: "memory quota must not be negative",
 		},
 	}
 	for _, test := range tests {
@@ -478,6 +637,66 @@ func TestPoolUpdateValidatesSchedulingPoliciesBeforeReadingPool(t *testing.T) {
 				t.Fatalf("pool update error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestPoolUpdateChangesOnlyRequestedQuotas(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cpu := apiresource.MustParse("8")
+	memory := apiresource.MustParse("32Gi")
+	pool := &resourcepoolv1alpha1.ResourcePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a"},
+		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+			Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpu, Memory: &memory},
+			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
+				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{Node: resourcepoolv1alpha1.NodeSchedulerPolicySpread},
+			},
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	runUpdate := func(args ...string) {
+		t.Helper()
+		command := newRootCommand(&commandOptions{client: cli, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+		command.SetArgs(append([]string{"pool", "update", pool.Name}, args...))
+		if err := command.Execute(); err != nil {
+			t.Fatalf("pool update %v error = %v", args, err)
+		}
+	}
+	readPool := func() *resourcepoolv1alpha1.ResourcePool {
+		t.Helper()
+		updated := &resourcepoolv1alpha1.ResourcePool{}
+		if err := cli.Get(t.Context(), client.ObjectKey{Name: pool.Name}, updated); err != nil {
+			t.Fatalf("get updated pool: %v", err)
+		}
+		return updated
+	}
+
+	runUpdate("--cpu-quota", "16")
+	updated := readPool()
+	if updated.Spec.Quota == nil || updated.Spec.Quota.CPU == nil || updated.Spec.Quota.CPU.Cmp(apiresource.MustParse("16")) != 0 {
+		t.Fatalf("updated CPU quota = %#v, want 16", updated.Spec.Quota)
+	}
+	if updated.Spec.Quota.Memory == nil || updated.Spec.Quota.Memory.Cmp(memory) != 0 {
+		t.Fatalf("updated memory quota = %#v, want preserved 32Gi", updated.Spec.Quota)
+	}
+	if updated.Spec.WorkloadDefaults == nil || updated.Spec.WorkloadDefaults.SchedulingPolicy.Node != resourcepoolv1alpha1.NodeSchedulerPolicySpread {
+		t.Fatalf("updated workload defaults = %#v, want preserved node policy", updated.Spec.WorkloadDefaults)
+	}
+
+	runUpdate("--memory-quota", "unlimited")
+	updated = readPool()
+	if updated.Spec.Quota == nil || updated.Spec.Quota.CPU == nil || updated.Spec.Quota.Memory != nil {
+		t.Fatalf("updated quota = %#v, want CPU preserved and memory unlimited", updated.Spec.Quota)
+	}
+
+	runUpdate("--cpu-quota", "unlimited")
+	updated = readPool()
+	if updated.Spec.Quota != nil {
+		t.Fatalf("updated quota = %#v, want all quotas removed", updated.Spec.Quota)
 	}
 }
 
@@ -558,9 +777,12 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	cpuQuota := apiresource.MustParse("128")
+	memoryQuota := apiresource.MustParse("512Gi")
 	pool := &resourcepoolv1alpha1.ResourcePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "training-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "training-a", Generation: 7},
 		Spec: resourcepoolv1alpha1.ResourcePoolSpec{
+			Quota: &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpuQuota, Memory: &memoryQuota},
 			WorkloadDefaults: &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{
 				SchedulingPolicy: &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{
 					Node: resourcepoolv1alpha1.NodeSchedulerPolicySpread,
@@ -572,6 +794,15 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 			DiscoveredDevices: 2,
 			HealthyDevices:    1,
 			Revision:          "inventory-7",
+			Quota: &resourcepoolv1alpha1.ResourcePoolQuotaStatus{
+				ObservedGeneration: 7,
+				Used: resourcepoolv1alpha1.ResourcePoolResourceUsage{
+					CPU: apiresource.MustParse("32"), Memory: apiresource.MustParse("96Gi"),
+				},
+				Reserved: resourcepoolv1alpha1.ResourcePoolResourceUsage{
+					CPU: apiresource.MustParse("4"), Memory: apiresource.MustParse("8Gi"),
+				},
+			},
 		},
 	}
 	objects := []client.Object{
@@ -632,6 +863,13 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 
 	want := "" +
 		"Name:                   training-a\n" +
+		"CPU quota:              128\n" +
+		"Memory quota:           512Gi\n" +
+		"Quota ledger:           current (generation 7)\n" +
+		"CPU used:               32\n" +
+		"CPU reserved:           4\n" +
+		"Memory used:            96Gi\n" +
+		"Memory reserved:        8Gi\n" +
 		"Node scheduler policy:  spread\n" +
 		"GPU scheduler policy:   binpack,numa\n" +
 		"Discovered devices:     2\n" +
@@ -669,8 +907,72 @@ func TestPoolDescribeShowsEmptyAssociations(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatalf("pool describe error = %v", err)
 	}
+	if !strings.Contains(output.String(), "CPU quota:              <unlimited>\nMemory quota:           <unlimited>\n") {
+		t.Fatalf("pool describe empty quota output = %q, want unlimited CPU and memory", output.String())
+	}
+	if strings.Contains(output.String(), "Quota ledger:") {
+		t.Fatalf("pool describe unconfigured quota output = %q, want no quota ledger state", output.String())
+	}
 	if got, want := output.String(), "Namespaces:\n  <none>\n\nDevices:\n  <none>\n"; !strings.Contains(got, want) {
 		t.Fatalf("pool describe empty associations = %q, want suffix %q", got, want)
+	}
+
+	cpuQuota := apiresource.MustParse("4")
+	pool.Generation = 4
+	pool.Spec.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: &cpuQuota}
+	pool.Status.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaStatus{ObservedGeneration: 3}
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe stale quota ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           stale (observed generation 3, current generation 4)\n") {
+		t.Fatalf("pool describe stale quota ledger output = %q", output.String())
+	}
+
+	pool.Status.Quota = nil
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe pending quota ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           pending (current generation 4)\n") {
+		t.Fatalf("pool describe pending quota ledger output = %q", output.String())
+	}
+
+	pool.Generation = 5
+	pool.Spec.Quota = nil
+	pool.Status.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaStatus{
+		ObservedGeneration: 4,
+		Used: resourcepoolv1alpha1.ResourcePoolResourceUsage{
+			CPU: apiresource.MustParse("2"),
+		},
+	}
+	output.Reset()
+	command = newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		out:    output,
+		errOut: output,
+	})
+	command.SetArgs([]string{"pool", "describe", pool.Name})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("pool describe removed quota with stale ledger error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Quota ledger:           stale (observed generation 4, current generation 5)\n") {
+		t.Fatalf("pool describe removed quota with stale ledger output = %q", output.String())
+	}
+	if !strings.Contains(output.String(), "CPU used:               2\n") {
+		t.Fatalf("pool describe removed quota usage output = %q", output.String())
 	}
 }
 

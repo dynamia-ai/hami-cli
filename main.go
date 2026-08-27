@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,10 +110,11 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 			}
 			sort.Slice(pools.Items, func(i, j int) bool { return pools.Items[i].Name < pools.Items[j].Name })
 			writer := newTableWriter(options.out)
-			fmt.Fprintln(writer, "NAME\tDISCOVERED\tHEALTHY\tREVISION")
+			fmt.Fprintln(writer, "NAME\tCPU-QUOTA\tMEMORY-QUOTA\tDISCOVERED\tHEALTHY\tREVISION")
 			for i := range pools.Items {
 				pool := &pools.Items[i]
-				fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", pool.Name, pool.Status.DiscoveredDevices, pool.Status.HealthyDevices, pool.Status.Revision)
+				cpuQuota, memoryQuota := poolQuotaValues(pool)
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%d\t%s\n", pool.Name, cpuQuota, memoryQuota, pool.Status.DiscoveredDevices, pool.Status.HealthyDevices, pool.Status.Revision)
 			}
 			return writer.Flush()
 		},
@@ -125,44 +127,65 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 		newPoolDescribeCommand(options),
 		newPoolUnbindCommand(options),
 		newPoolUpdateCommand(options),
-		&cobra.Command{
-			Use:   "create NAME",
-			Short: "Create an empty resource pool",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(command *cobra.Command, args []string) error {
-				cli, err := options.getClient()
-				if err != nil {
-					return err
-				}
-				pool := &resourcepoolv1alpha1.ResourcePool{
-					TypeMeta:   metav1.TypeMeta{APIVersion: resourcepoolv1alpha1.GroupVersion.String(), Kind: "ResourcePool"},
-					ObjectMeta: metav1.ObjectMeta{Name: args[0]},
-					Spec:       resourcepoolv1alpha1.ResourcePoolSpec{},
-				}
-				if err := cli.Create(command.Context(), pool); err != nil {
-					return fmt.Errorf("create resource pool %q: %w", args[0], err)
-				}
-				fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s created\n", args[0])
-				return nil
-			},
-		},
+		newPoolCreateCommand(options),
 		newPoolDeleteCommand(options),
 	)
+	return command
+}
+
+func newPoolCreateCommand(options *commandOptions) *cobra.Command {
+	var cpuQuota string
+	var memoryQuota string
+	command := &cobra.Command{
+		Use:   "create NAME",
+		Short: "Create a resource pool",
+		Args:  cobra.ExactArgs(1),
+		PreRunE: func(command *cobra.Command, _ []string) error {
+			_, _, err := parsePoolQuotaFlags(command, cpuQuota, memoryQuota, false)
+			return err
+		},
+		RunE: func(command *cobra.Command, args []string) error {
+			cli, err := options.getClient()
+			if err != nil {
+				return err
+			}
+			cpu, memory, err := parsePoolQuotaFlags(command, cpuQuota, memoryQuota, false)
+			if err != nil {
+				return err
+			}
+			pool := &resourcepoolv1alpha1.ResourcePool{
+				TypeMeta:   metav1.TypeMeta{APIVersion: resourcepoolv1alpha1.GroupVersion.String(), Kind: "ResourcePool"},
+				ObjectMeta: metav1.ObjectMeta{Name: args[0]},
+				Spec:       resourcepoolv1alpha1.ResourcePoolSpec{},
+			}
+			if cpu != nil || memory != nil {
+				pool.Spec.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaSpec{CPU: cpu, Memory: memory}
+			}
+			if err := cli.Create(command.Context(), pool); err != nil {
+				return fmt.Errorf("create resource pool %q: %w", args[0], err)
+			}
+			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s created\n", args[0])
+			return nil
+		},
+	}
+	addPoolQuotaFlags(command, &cpuQuota, &memoryQuota, false)
 	return command
 }
 
 func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 	var nodePolicy string
 	var gpuPolicy string
+	var cpuQuota string
+	var memoryQuota string
 	command := &cobra.Command{
 		Use:   "update NAME",
-		Short: "Update workload scheduling defaults for a resource pool",
+		Short: "Update a resource pool's workload defaults and quotas",
 		Args:  cobra.ExactArgs(1),
 		PreRunE: func(command *cobra.Command, _ []string) error {
 			nodeChanged := command.Flags().Changed("node-scheduler-policy")
 			gpuChanged := command.Flags().Changed("gpu-scheduler-policy")
-			if !nodeChanged && !gpuChanged {
-				return errors.New("at least one of --node-scheduler-policy or --gpu-scheduler-policy must be specified")
+			if !nodeChanged && !gpuChanged && !command.Flags().Changed("cpu-quota") && !command.Flags().Changed("memory-quota") {
+				return errors.New("at least one scheduling-policy or quota flag must be specified")
 			}
 			if nodeChanged {
 				if err := validateNodeSchedulerPolicy(nodePolicy); err != nil {
@@ -174,7 +197,8 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 					return err
 				}
 			}
-			return nil
+			_, _, err := parsePoolQuotaFlags(command, cpuQuota, memoryQuota, true)
+			return err
 		},
 		RunE: func(command *cobra.Command, args []string) error {
 			cli, err := options.getClient()
@@ -188,18 +212,39 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 			}
 
 			base := pool.DeepCopy()
-			if pool.Spec.WorkloadDefaults == nil {
-				pool.Spec.WorkloadDefaults = &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{}
+			if command.Flags().Changed("node-scheduler-policy") || command.Flags().Changed("gpu-scheduler-policy") {
+				if pool.Spec.WorkloadDefaults == nil {
+					pool.Spec.WorkloadDefaults = &resourcepoolv1alpha1.ResourcePoolWorkloadDefaults{}
+				}
+				if pool.Spec.WorkloadDefaults.SchedulingPolicy == nil {
+					pool.Spec.WorkloadDefaults.SchedulingPolicy = &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{}
+				}
+				policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
+				if command.Flags().Changed("node-scheduler-policy") {
+					policy.Node = resourcepoolv1alpha1.NodeSchedulerPolicy(nodePolicy)
+				}
+				if command.Flags().Changed("gpu-scheduler-policy") {
+					policy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicy(gpuPolicy)
+				}
 			}
-			if pool.Spec.WorkloadDefaults.SchedulingPolicy == nil {
-				pool.Spec.WorkloadDefaults.SchedulingPolicy = &resourcepoolv1alpha1.ResourcePoolSchedulingPolicy{}
+
+			cpu, memory, err := parsePoolQuotaFlags(command, cpuQuota, memoryQuota, true)
+			if err != nil {
+				return err
 			}
-			policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
-			if command.Flags().Changed("node-scheduler-policy") {
-				policy.Node = resourcepoolv1alpha1.NodeSchedulerPolicy(nodePolicy)
-			}
-			if command.Flags().Changed("gpu-scheduler-policy") {
-				policy.GPU = resourcepoolv1alpha1.GPUSchedulerPolicy(gpuPolicy)
+			if command.Flags().Changed("cpu-quota") || command.Flags().Changed("memory-quota") {
+				if pool.Spec.Quota == nil {
+					pool.Spec.Quota = &resourcepoolv1alpha1.ResourcePoolQuotaSpec{}
+				}
+				if command.Flags().Changed("cpu-quota") {
+					pool.Spec.Quota.CPU = cpu
+				}
+				if command.Flags().Changed("memory-quota") {
+					pool.Spec.Quota.Memory = memory
+				}
+				if pool.Spec.Quota.CPU == nil && pool.Spec.Quota.Memory == nil {
+					pool.Spec.Quota = nil
+				}
 			}
 
 			if err := cli.Patch(command.Context(), pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -211,7 +256,69 @@ func newPoolUpdateCommand(options *commandOptions) *cobra.Command {
 	}
 	command.Flags().StringVar(&nodePolicy, "node-scheduler-policy", "", "Node scheduling policy: binpack or spread")
 	command.Flags().StringVar(&gpuPolicy, "gpu-scheduler-policy", "", "Ordered, comma-separated GPU policies: binpack, spread, topology-aware, mutex, or numa")
+	addPoolQuotaFlags(command, &cpuQuota, &memoryQuota, true)
 	return command
+}
+
+func addPoolQuotaFlags(command *cobra.Command, cpuQuota, memoryQuota *string, allowRemoval bool) {
+	cpuUsage := "Optional aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling"
+	memoryUsage := "Optional aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling"
+	if allowRemoval {
+		cpuUsage = "Aggregate CPU limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit"
+		memoryUsage = "Aggregate memory limit ceiling as a Kubernetes quantity; 0 is a hard zero ceiling, unlimited removes the limit"
+	}
+	command.Flags().StringVar(cpuQuota, "cpu-quota", "", cpuUsage)
+	command.Flags().StringVar(memoryQuota, "memory-quota", "", memoryUsage)
+}
+
+func parsePoolQuotaFlags(command *cobra.Command, cpuValue, memoryValue string, allowUnlimited bool) (*apiresource.Quantity, *apiresource.Quantity, error) {
+	var cpu *apiresource.Quantity
+	var memory *apiresource.Quantity
+	var err error
+	if command.Flags().Changed("cpu-quota") {
+		cpu, err = parsePoolQuota("CPU", cpuValue, allowUnlimited)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if command.Flags().Changed("memory-quota") {
+		memory, err = parsePoolQuota("memory", memoryValue, allowUnlimited)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return cpu, memory, nil
+}
+
+func parsePoolQuota(resourceName, value string, allowUnlimited bool) (*apiresource.Quantity, error) {
+	if value == "unlimited" {
+		if !allowUnlimited {
+			return nil, fmt.Errorf("%s quota %q is only valid for pool update", resourceName, value)
+		}
+		return nil, nil
+	}
+	quantity, err := apiresource.ParseQuantity(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s quota %q: %w", resourceName, value, err)
+	}
+	if quantity.Sign() < 0 {
+		return nil, fmt.Errorf("%s quota must not be negative", resourceName)
+	}
+	return &quantity, nil
+}
+
+func poolQuotaValues(pool *resourcepoolv1alpha1.ResourcePool) (string, string) {
+	cpu, memory := "<unlimited>", "<unlimited>"
+	if pool.Spec.Quota == nil {
+		return cpu, memory
+	}
+	if pool.Spec.Quota.CPU != nil {
+		cpu = pool.Spec.Quota.CPU.String()
+	}
+	if pool.Spec.Quota.Memory != nil {
+		memory = pool.Spec.Quota.Memory.String()
+	}
+	return cpu, memory
 }
 
 func validateNodeSchedulerPolicy(policy string) error {
@@ -306,6 +413,7 @@ func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
 
 func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, devices *resourcepoolv1alpha1.GPUDeviceList) error {
 	nodePolicy, gpuPolicy := "<unset>", "<unset>"
+	cpuQuota, memoryQuota := poolQuotaValues(pool)
 	if pool.Spec.WorkloadDefaults != nil && pool.Spec.WorkloadDefaults.SchedulingPolicy != nil {
 		policy := pool.Spec.WorkloadDefaults.SchedulingPolicy
 		if policy.Node != "" {
@@ -322,6 +430,17 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 
 	writer := newTableWriter(out)
 	fmt.Fprintf(writer, "Name:\t%s\n", pool.Name)
+	fmt.Fprintf(writer, "CPU quota:\t%s\n", cpuQuota)
+	fmt.Fprintf(writer, "Memory quota:\t%s\n", memoryQuota)
+	if ledger := quotaLedgerState(pool); ledger != "" {
+		fmt.Fprintf(writer, "Quota ledger:\t%s\n", ledger)
+	}
+	if pool.Status.Quota != nil {
+		fmt.Fprintf(writer, "CPU used:\t%s\n", pool.Status.Quota.Used.CPU.String())
+		fmt.Fprintf(writer, "CPU reserved:\t%s\n", pool.Status.Quota.Reserved.CPU.String())
+		fmt.Fprintf(writer, "Memory used:\t%s\n", pool.Status.Quota.Used.Memory.String())
+		fmt.Fprintf(writer, "Memory reserved:\t%s\n", pool.Status.Quota.Reserved.Memory.String())
+	}
 	fmt.Fprintf(writer, "Node scheduler policy:\t%s\n", nodePolicy)
 	fmt.Fprintf(writer, "GPU scheduler policy:\t%s\n", gpuPolicy)
 	fmt.Fprintf(writer, "Discovered devices:\t%d\n", pool.Status.DiscoveredDevices)
@@ -358,6 +477,20 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 		fmt.Fprintf(writer, "  %s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Status.Discovered, device.Status.Healthy)
 	}
 	return writer.Flush()
+}
+
+func quotaLedgerState(pool *resourcepoolv1alpha1.ResourcePool) string {
+	if pool.Status.Quota == nil {
+		if pool.Spec.Quota == nil {
+			return ""
+		}
+		return fmt.Sprintf("pending (current generation %d)", pool.Generation)
+	}
+	observed := pool.Status.Quota.ObservedGeneration
+	if observed == pool.Generation {
+		return fmt.Sprintf("current (generation %d)", observed)
+	}
+	return fmt.Sprintf("stale (observed generation %d, current generation %d)", observed, pool.Generation)
 }
 
 func newPoolDeleteCommand(options *commandOptions) *cobra.Command {
