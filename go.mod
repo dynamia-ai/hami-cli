@@ -4,8 +4,8 @@ go 1.27.0
 
 require (
 	github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api v0.0.0-20260827070057-8ac66493ebf9
-	github.com/lathe-cli/kitup/go v0.1.3
-	github.com/lathe-cli/kitup/go-cobra v0.1.3
+	github.com/lathe-cli/kitup/go v0.1.4
+	github.com/lathe-cli/kitup/go-cobra v0.1.4
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.45.0
 	k8s.io/apimachinery v0.36.3

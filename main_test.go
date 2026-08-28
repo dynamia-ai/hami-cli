@@ -51,14 +51,15 @@ func TestRootCommandUsesKubectlPluginDisplayNameAndStandardFlags(t *testing.T) {
 	}
 }
 
-func TestSkillInstallCopiesEmbeddedResourcePoolSkill(t *testing.T) {
+func TestSkillLifecycleManagesEmbeddedResourcePoolSkill(t *testing.T) {
 	home := t.TempDir()
+	cwd := t.TempDir()
 	output := &bytes.Buffer{}
 	command := newRootCommand(&commandOptions{
 		out:       output,
 		errOut:    output,
 		kitupHome: home,
-		kitupCWD:  t.TempDir(),
+		kitupCWD:  cwd,
 	})
 	command.SetArgs([]string{"skill", "install", "--scope", "user", "--agent", "codex", "--yes"})
 	if err := command.Execute(); err != nil {
@@ -91,6 +92,55 @@ func TestSkillInstallCopiesEmbeddedResourcePoolSkill(t *testing.T) {
 	}
 	if metadata.SchemaVersion != 1 || metadata.AppID != "hami-cli" || metadata.SkillName != "managing-hami-resource-pools" || metadata.Source != "bundled" {
 		t.Fatalf("kitup metadata = %+v", metadata)
+	}
+
+	statusOutput := &bytes.Buffer{}
+	command = newRootCommand(&commandOptions{
+		out:       statusOutput,
+		errOut:    statusOutput,
+		kitupHome: home,
+		kitupCWD:  cwd,
+	})
+	command.SetArgs([]string{"skill", "status", "--scope", "user", "--agent", "codex", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("skill status error = %v, output = %q", err, statusOutput.String())
+	}
+	status := struct {
+		Installed []struct {
+			TargetDir string `json:"targetDir"`
+		} `json:"installed"`
+	}{}
+	if err := json.Unmarshal(statusOutput.Bytes(), &status); err != nil {
+		t.Fatalf("decode skill status: %v", err)
+	}
+	if len(status.Installed) != 1 || status.Installed[0].TargetDir != target {
+		t.Fatalf("installed skill status = %+v, want target %q", status.Installed, target)
+	}
+
+	uninstallOutput := &bytes.Buffer{}
+	command = newRootCommand(&commandOptions{
+		out:       uninstallOutput,
+		errOut:    uninstallOutput,
+		kitupHome: home,
+		kitupCWD:  cwd,
+	})
+	command.SetArgs([]string{"skill", "uninstall", "--scope", "user", "--agent", "codex", "--yes", "--json"})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("skill uninstall error = %v, output = %q", err, uninstallOutput.String())
+	}
+	uninstall := struct {
+		Removed []struct {
+			TargetDir string `json:"targetDir"`
+		} `json:"removed"`
+	}{}
+	if err := json.Unmarshal(uninstallOutput.Bytes(), &uninstall); err != nil {
+		t.Fatalf("decode skill uninstall: %v", err)
+	}
+	if len(uninstall.Removed) != 1 || uninstall.Removed[0].TargetDir != target {
+		t.Fatalf("uninstalled skill targets = %+v, want target %q", uninstall.Removed, target)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uninstalled skill target still exists or stat failed unexpectedly: %v", err)
 	}
 }
 
