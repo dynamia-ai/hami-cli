@@ -24,7 +24,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const resourcePoolSkillRoot = "skills/managing-hami-resource-pools"
+const (
+	resourcePoolSkillName = "managing-hami-resource-pools"
+	resourcePoolSkillRoot = "skills/" + resourcePoolSkillName
+)
 
 //go:embed skills/managing-hami-resource-pools
 var embeddedSkills embed.FS
@@ -32,6 +35,7 @@ var embeddedSkills embed.FS
 func newSkillCommand(options *commandOptions) *cobra.Command {
 	return kitupcobra.NewSkillCommand(kitupcobra.Options{
 		AppID:        "hami-cli",
+		SkillName:    resourcePoolSkillName,
 		Bundle:       kitup.FSBundle(embeddedSkills, resourcePoolSkillRoot),
 		DefaultScope: kitup.UserScope,
 		Home:         options.kitupHome,
