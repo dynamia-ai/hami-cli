@@ -1,6 +1,6 @@
 ---
 name: managing-hami-resource-pools
-description: Use when inspecting or changing HAMi Enterprise ResourcePool, GPUDevice, or ResourcePoolBinding objects with hami-cli, including namespace access, GPU pool ownership, cleanup, or live-cluster validation.
+description: Use when inspecting or changing HAMi Enterprise ResourcePool, GPUDevice, or ResourcePoolBinding objects with hami-cli, including namespace access, NVIDIA or Ascend device pool ownership, cleanup, or live-cluster validation.
 ---
 
 # Managing HAMi Resource Pools
@@ -34,6 +34,7 @@ Read [references/operations.md](references/operations.md) before executing mutat
 - Never assume a namespace exists or is disposable; `hami-cli` cannot establish that fact.
 - `pool bindings` requires either one pool name or `-A`/`--all-pools`; do not combine them.
 - `pool bindings` always spans namespaces and rejects an explicit `--namespace`; filter its structured output when only one namespace is relevant.
+- For physical-identity assignment or unassignment, use the exact node, device type, and device ID from structured inventory. `--device-type` defaults to `NVIDIA`; Ascend requires its exact scheduler `commonWord`. See the operations reference for server prerequisites and allocation semantics.
 - Supported output formats are `table`, `name`, `json`, and `yaml`; there is no `wide` output.
 - Repeating `pool bind` returns `AlreadyExists`. Use `apply` only when the caller owns the desired object; do not adopt an unrelated binding.
 - `pool unbind` and plain `pool delete` are name-based deletes without UID preconditions. `pool delete --force` reads the target first and uses UID preconditions for the pool and each binding plus optimistic patches for devices, but it is still a destructive teardown rather than temporary-cleanup ownership proof.

@@ -72,7 +72,7 @@ func main() {
 func newRootCommand(options *commandOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:           "hami-cli",
-		Short:         "Manage HAMi Enterprise physical GPU resource pools",
+		Short:         "Manage HAMi Enterprise physical device resource pools",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -486,6 +486,9 @@ func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
 				if left.Spec.Identity.NodeName != right.Spec.Identity.NodeName {
 					return left.Spec.Identity.NodeName < right.Spec.Identity.NodeName
 				}
+				if left.Spec.Identity.DeviceType != right.Spec.Identity.DeviceType {
+					return left.Spec.Identity.DeviceType < right.Spec.Identity.DeviceType
+				}
 				if left.Spec.Identity.DeviceID != right.Spec.Identity.DeviceID {
 					return left.Spec.Identity.DeviceID < right.Spec.Identity.DeviceID
 				}
@@ -557,10 +560,10 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 		return nil
 	}
 	writer = newTableWriter(out)
-	fmt.Fprintln(writer, "  NAME\tNODE\tDEVICE-ID\tDISCOVERED\tHEALTHY")
+	fmt.Fprintln(writer, "  NAME\tNODE\tDEVICE-TYPE\tDEVICE-ID\tDISCOVERED\tHEALTHY")
 	for i := range devices.Items {
 		device := &devices.Items[i]
-		fmt.Fprintf(writer, "  %s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Status.Discovered, device.Status.Healthy)
+		fmt.Fprintf(writer, "  %s\t%s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceType, device.Spec.Identity.DeviceID, device.Status.Discovered, device.Status.Healthy)
 	}
 	return writer.Flush()
 }
@@ -712,7 +715,7 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 	list := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
-		Short:   "List discovered physical GPUs",
+		Short:   "List discovered physical devices",
 		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			cli, err := options.getClient()
@@ -734,10 +737,16 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 			}
 			sort.Slice(devices.Items, func(i, j int) bool {
 				left, right := &devices.Items[i], &devices.Items[j]
-				if left.Spec.Identity.NodeName == right.Spec.Identity.NodeName {
+				if left.Spec.Identity.NodeName != right.Spec.Identity.NodeName {
+					return left.Spec.Identity.NodeName < right.Spec.Identity.NodeName
+				}
+				if left.Spec.Identity.DeviceType != right.Spec.Identity.DeviceType {
+					return left.Spec.Identity.DeviceType < right.Spec.Identity.DeviceType
+				}
+				if left.Spec.Identity.DeviceID != right.Spec.Identity.DeviceID {
 					return left.Spec.Identity.DeviceID < right.Spec.Identity.DeviceID
 				}
-				return left.Spec.Identity.NodeName < right.Spec.Identity.NodeName
+				return left.Name < right.Name
 			})
 			output, _ := command.Flags().GetString("output")
 			if output != "table" {
@@ -745,14 +754,14 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 				return printObject(options.out, output, devices, deviceNames(devices))
 			}
 			writer := newTableWriter(options.out)
-			fmt.Fprintln(writer, "NAME\tNODE\tDEVICE-ID\tPOOL\tDISCOVERED\tHEALTHY")
+			fmt.Fprintln(writer, "NAME\tNODE\tDEVICE-TYPE\tDEVICE-ID\tPOOL\tDISCOVERED\tHEALTHY")
 			for i := range devices.Items {
 				device := &devices.Items[i]
 				pool := "<unassigned>"
 				if device.Spec.PoolRef != nil {
 					pool = device.Spec.PoolRef.Name
 				}
-				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, pool, device.Status.Discovered, device.Status.Healthy)
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%t\t%t\n", device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceType, device.Spec.Identity.DeviceID, pool, device.Status.Discovered, device.Status.Healthy)
 			}
 			return writer.Flush()
 		},
@@ -765,17 +774,17 @@ func newDeviceCommand(options *commandOptions) *cobra.Command {
 }
 
 func newDeviceAssignCommand(options *commandOptions) *cobra.Command {
-	var nodeName, deviceID string
+	var nodeName, deviceType, deviceID string
 	command := &cobra.Command{
 		Use:   "assign [DEVICE_NAME] --pool POOL",
-		Short: "Atomically assign one physical GPU to one pool",
+		Short: "Atomically assign one physical device to one pool",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			cli, err := options.getClient()
+			name, err := deviceNameFromArgs(command, args, nodeName, deviceType, deviceID)
 			if err != nil {
 				return err
 			}
-			name, err := deviceNameFromArgs(args, nodeName, deviceID)
+			cli, err := options.getClient()
 			if err != nil {
 				return err
 			}
@@ -795,17 +804,18 @@ func newDeviceAssignCommand(options *commandOptions) *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&nodeName, "node", "", "Kubernetes Node name")
-	command.Flags().StringVar(&deviceID, "device-id", "", "Physical GPU UUID")
+	command.Flags().StringVar(&deviceType, "device-type", resourcepoolv1alpha1.NVIDIADeviceType, "Exact HAMi device type from inventory (e.g. NVIDIA, Ascend310P, Ascend910B)")
+	command.Flags().StringVar(&deviceID, "device-id", "", "Physical device ID exactly as reported in inventory")
 	command.Flags().String("pool", "", "ResourcePool name")
 	_ = command.MarkFlagRequired("pool")
 	return command
 }
 
 func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
-	var nodeName, deviceID, expectedUID, expectedPool string
+	var nodeName, deviceType, deviceID, expectedUID, expectedPool string
 	command := &cobra.Command{
 		Use:   "unassign [DEVICE_NAME]",
-		Short: "Remove one physical GPU from its resource pool",
+		Short: "Remove one physical device from its resource pool",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			hasExpectedUID := command.Flags().Changed("expected-uid")
@@ -816,11 +826,11 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 			if hasExpectedUID && (expectedUID == "" || expectedPool == "") {
 				return fmt.Errorf("--expected-uid and --expected-pool must not be empty")
 			}
-			cli, err := options.getClient()
+			name, err := deviceNameFromArgs(command, args, nodeName, deviceType, deviceID)
 			if err != nil {
 				return err
 			}
-			name, err := deviceNameFromArgs(args, nodeName, deviceID)
+			cli, err := options.getClient()
 			if err != nil {
 				return err
 			}
@@ -845,7 +855,8 @@ func newDeviceUnassignCommand(options *commandOptions) *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&nodeName, "node", "", "Kubernetes Node name")
-	command.Flags().StringVar(&deviceID, "device-id", "", "Physical GPU UUID")
+	command.Flags().StringVar(&deviceType, "device-type", resourcepoolv1alpha1.NVIDIADeviceType, "Exact HAMi device type from inventory (e.g. NVIDIA, Ascend310P, Ascend910B)")
+	command.Flags().StringVar(&deviceID, "device-id", "", "Physical device ID exactly as reported in inventory")
 	command.Flags().StringVar(&expectedUID, "expected-uid", "", "Require the current GPUDevice UID before unassigning")
 	command.Flags().StringVar(&expectedPool, "expected-pool", "", "Require the current ResourcePool name before unassigning")
 	return command
@@ -1198,17 +1209,20 @@ func pluginDisplayName(executable string) string {
 	return "kubectl " + name
 }
 
-func deviceNameFromArgs(args []string, nodeName, deviceID string) (string, error) {
+func deviceNameFromArgs(command *cobra.Command, args []string, nodeName, deviceType, deviceID string) (string, error) {
 	if len(args) == 1 {
-		if nodeName != "" || deviceID != "" {
-			return "", fmt.Errorf("DEVICE_NAME cannot be combined with --node or --device-id")
+		if command.Flags().Changed("node") || command.Flags().Changed("device-type") || command.Flags().Changed("device-id") {
+			return "", fmt.Errorf("DEVICE_NAME cannot be combined with --node, --device-type, or --device-id")
 		}
 		return args[0], nil
 	}
 	if nodeName == "" || deviceID == "" {
 		return "", fmt.Errorf("provide DEVICE_NAME, or provide both --node and --device-id")
 	}
-	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: nodeName, DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: deviceID}
+	if deviceType == "" || strings.TrimSpace(deviceType) != deviceType {
+		return "", fmt.Errorf("--device-type must not be empty or contain surrounding whitespace")
+	}
+	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: nodeName, DeviceType: deviceType, DeviceID: deviceID}
 	return resourcepoolv1alpha1.DeviceObjectName(identity), nil
 }
 
