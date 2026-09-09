@@ -36,3 +36,25 @@ export PATH="$HOME/.local/bin:$PATH"
 ```bash
 curl -fsSL https://storage.dynamia.ai/hami-cli/install.sh | HAMI_CLI_AGENT=codex sh
 ```
+
+## Ascend 设备资源池
+
+Ascend 资源池需要服务端具备对应支持，并安装 `0.4.0` 版 CRD Chart，启用
+`resourcePoolManager.enabled`、`devices.ascend.enabled` 和对应的 `vnpus.configs`
+配置。CLI 参数不会启用服务端能力；当前资源池支持范围为 NVIDIA 和已启用的 Ascend 类型。
+
+先查看设备身份和当前分配，再使用实际值操作：
+
+```bash
+hami-cli --context TARGET_CONTEXT --request-timeout 20s device list -o json
+hami-cli --context TARGET_CONTEXT --request-timeout 20s device assign \
+  --node NODE_NAME --device-type Ascend310P --device-id DEVICE_ID --pool POOL_NAME
+```
+
+`--device-type` 使用 `spec.identity.deviceType` 中区分大小写的值，例如 `Ascend310P`
+或 `Ascend910B`；省略时默认为 `NVIDIA`。`--device-id` 原样使用
+`spec.identity.deviceID`，不要求 UUID 格式。`device unassign` 支持相同的身份参数。
+也可以直接使用 `GPUDevice` 对象名，此时不能同时提供上述身份参数。
+
+`device list` 和 `pool describe` 的表格包含 `DEVICE-TYPE` 列。操作前的分配检查、
+临时解绑保护和服务端前提见[资源池操作指南](skills/managing-hami-resource-pools/references/operations.md#manage-pool-and-device-ownership)。

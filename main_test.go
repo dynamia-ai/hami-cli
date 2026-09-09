@@ -311,8 +311,9 @@ func TestDeviceListTableAlignsLongValues(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gpu-d5d6dc2483b9831539b52b8ba053dc3d"},
 		Spec: resourcepoolv1alpha1.GPUDeviceSpec{
 			Identity: resourcepoolv1alpha1.DeviceIdentity{
-				NodeName: "izbp13trb08in2bs1nduw7z",
-				DeviceID: "GPU-ceee905d-48ac-93de-a81b-17c00e1e5e02",
+				NodeName:   "izbp13trb08in2bs1nduw7z",
+				DeviceType: "Ascend310P",
+				DeviceID:   "GPU-ceee905d-48ac-93de-a81b-17c00e1e5e02",
 			},
 			PoolRef: &resourcepoolv1alpha1.PoolReference{Name: "shared-gpu"},
 		},
@@ -337,11 +338,52 @@ func TestDeviceListTableAlignsLongValues(t *testing.T) {
 	if strings.Contains(output.String(), "\t") {
 		t.Fatalf("device list output contains unexpanded tabs: %q", output.String())
 	}
-	headings := []string{"NAME", "NODE", "DEVICE-ID", "POOL", "DISCOVERED", "HEALTHY"}
-	values := []string{device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceID, device.Spec.PoolRef.Name, "true", "false"}
+	headings := []string{"NAME", "NODE", "DEVICE-TYPE", "DEVICE-ID", "POOL", "DISCOVERED", "HEALTHY"}
+	values := []string{device.Name, device.Spec.Identity.NodeName, device.Spec.Identity.DeviceType, device.Spec.Identity.DeviceID, device.Spec.PoolRef.Name, "true", "false"}
 	for i := range headings {
 		if got, want := strings.Index(lines[1], values[i]), strings.Index(lines[0], headings[i]); got != want {
 			t.Errorf("column %s starts at %d in data row, want header position %d; output:\n%s", headings[i], got, want, output.String())
+		}
+	}
+}
+
+func TestDeviceListPreservesMixedDeviceIdentities(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	objects := []client.Object{}
+	for _, identity := range []resourcepoolv1alpha1.DeviceIdentity{
+		{NodeName: "node-a", DeviceType: "NVIDIA", DeviceID: "01-aBc_0"},
+		{NodeName: "node-a", DeviceType: "Ascend310P", DeviceID: "01-aBc_0"},
+		{NodeName: "node-b", DeviceType: "Ascend910B", DeviceID: "01-aBc_0"},
+	} {
+		objects = append(objects, &resourcepoolv1alpha1.GPUDevice{
+			ObjectMeta: metav1.ObjectMeta{Name: resourcepoolv1alpha1.DeviceObjectName(identity)},
+			Spec:       resourcepoolv1alpha1.GPUDeviceSpec{Identity: identity},
+		})
+	}
+	output := &bytes.Buffer{}
+	command := newRootCommand(&commandOptions{
+		client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+		out:    output, errOut: output,
+	})
+	command.SetArgs([]string{"device", "list", "--node", "node-a", "-o", "json"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var listed resourcepoolv1alpha1.GPUDeviceList
+	if err := json.Unmarshal(output.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != 2 {
+		t.Fatalf("listed devices = %d, want 2: %s", len(listed.Items), output)
+	}
+	for i, deviceType := range []string{"Ascend310P", "NVIDIA"} {
+		want := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: deviceType, DeviceID: "01-aBc_0"}
+		if got := listed.Items[i].Spec.Identity; got != want {
+			t.Errorf("listed identity = %+v, want %+v", got, want)
 		}
 	}
 }
@@ -1202,7 +1244,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 		&resourcepoolv1alpha1.GPUDevice{
 			ObjectMeta: metav1.ObjectMeta{Name: "device-b"},
 			Spec: resourcepoolv1alpha1.GPUDeviceSpec{
-				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-b", DeviceID: "GPU-B"},
+				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-b", DeviceType: "Ascend310P", DeviceID: "01-aBc_0"},
 				PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
 			},
 			Status: resourcepoolv1alpha1.GPUDeviceStatus{Discovered: true, Healthy: false},
@@ -1210,7 +1252,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 		&resourcepoolv1alpha1.GPUDevice{
 			ObjectMeta: metav1.ObjectMeta{Name: "device-a"},
 			Spec: resourcepoolv1alpha1.GPUDeviceSpec{
-				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceID: "GPU-A"},
+				Identity: resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: "NVIDIA", DeviceID: "GPU-A"},
 				PoolRef:  &resourcepoolv1alpha1.PoolReference{Name: pool.Name},
 			},
 			Status: resourcepoolv1alpha1.GPUDeviceStatus{Discovered: true, Healthy: true},
@@ -1256,9 +1298,9 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 		"  team-b     training-a  False\n" +
 		"\n" +
 		"Devices:\n" +
-		"  NAME      NODE    DEVICE-ID  DISCOVERED  HEALTHY\n" +
-		"  device-a  node-a  GPU-A      true        true\n" +
-		"  device-b  node-b  GPU-B      true        false\n"
+		"  NAME      NODE    DEVICE-TYPE  DEVICE-ID  DISCOVERED  HEALTHY\n" +
+		"  device-a  node-a  NVIDIA       GPU-A      true        true\n" +
+		"  device-b  node-b  Ascend310P   01-aBc_0   true        false\n"
 	if got := output.String(); got != want {
 		t.Fatalf("pool describe output = %q, want %q", got, want)
 	}
@@ -2049,53 +2091,122 @@ func TestDefaultApplyNamespace(t *testing.T) {
 	}
 }
 
-func TestDeviceAssignInputForms(t *testing.T) {
+func TestDeviceAssignmentInputForms(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: resourcepoolv1alpha1.NVIDIADeviceType, DeviceID: "GPU-A"}
-	tests := []struct {
-		name, deviceName string
-		args             []string
-	}{
-		{name: "object name", deviceName: "device-object", args: []string{"device", "assign", "device-object", "--pool", "training-a"}},
-		{name: "physical identity", deviceName: resourcepoolv1alpha1.DeviceObjectName(identity), args: []string{"device", "assign", "--node", "node-a", "--device-id", "GPU-A", "--pool", "training-a"}},
+	for _, operation := range []string{"assign", "unassign"} {
+		for _, deviceType := range []string{"NVIDIA", "Ascend310P", "Ascend910B"} {
+			for _, form := range []string{"object name", "physical identity", "default NVIDIA identity"} {
+				if form == "default NVIDIA identity" && deviceType != "NVIDIA" {
+					continue
+				}
+				t.Run(operation+"/"+deviceType+"/"+form, func(t *testing.T) {
+					identity := resourcepoolv1alpha1.DeviceIdentity{NodeName: "node-a", DeviceType: deviceType, DeviceID: "01-aBc_0"}
+					device := &resourcepoolv1alpha1.GPUDevice{
+						ObjectMeta: metav1.ObjectMeta{Name: resourcepoolv1alpha1.DeviceObjectName(identity), UID: "device-uid", ResourceVersion: "1"},
+						Spec:       resourcepoolv1alpha1.GPUDeviceSpec{Identity: identity},
+					}
+					if operation == "unassign" {
+						device.Spec.PoolRef = &resourcepoolv1alpha1.PoolReference{Name: "training-a"}
+					}
+					device.Labels = resourcepoolv1alpha1.PoolLabels(device)
+					device.Labels["keep"] = "value"
+					other := device.DeepCopy()
+					other.Spec.Identity.DeviceType = "Ascend910C"
+					other.Name = resourcepoolv1alpha1.DeviceObjectName(other.Spec.Identity)
+					other.UID = "other-uid"
+					other.Labels = resourcepoolv1alpha1.PoolLabels(other)
+					cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(device, other).Build()
+					args := []string{"device", operation}
+					if form == "object name" {
+						args = append(args, device.Name)
+					} else {
+						args = append(args, "--node", identity.NodeName, "--device-id", identity.DeviceID)
+						if form == "physical identity" {
+							args = append(args, "--device-type", deviceType)
+						}
+					}
+					if operation == "assign" {
+						args = append(args, "--pool", "training-a")
+					} else {
+						args = append(args, "--expected-uid", "device-uid", "--expected-pool", "training-a")
+					}
+					output := &bytes.Buffer{}
+					command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
+					command.SetArgs(args)
+					if err := command.Execute(); err != nil {
+						t.Fatalf("Execute() error = %v", err)
+					}
+					updated := &resourcepoolv1alpha1.GPUDevice{}
+					if err := cli.Get(t.Context(), client.ObjectKey{Name: device.Name}, updated); err != nil {
+						t.Fatal(err)
+					}
+					wantPool := "<unassigned>"
+					if operation == "assign" {
+						wantPool = "training-a"
+					}
+					if got := gpuDevicePoolName(updated); got != wantPool {
+						t.Fatalf("updated pool = %q, want %q", got, wantPool)
+					}
+					if updated.Spec.Identity != identity || updated.Labels[resourcepoolv1alpha1.DeviceTypeLabel] != strings.ToLower(deviceType) || updated.Labels["keep"] != "value" {
+						t.Fatalf("device identity or labels changed unexpectedly: %+v", updated)
+					}
+					wantPoolLabel := ""
+					if operation == "assign" {
+						wantPoolLabel = "training-a"
+					}
+					if updated.Labels[resourcepoolv1alpha1.PoolLabel] != wantPoolLabel {
+						t.Fatalf("pool label = %q, want %q", updated.Labels[resourcepoolv1alpha1.PoolLabel], wantPoolLabel)
+					}
+					untouched := &resourcepoolv1alpha1.GPUDevice{}
+					if err := cli.Get(t.Context(), client.ObjectKey{Name: other.Name}, untouched); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(untouched.Spec, other.Spec) || !reflect.DeepEqual(untouched.Labels, other.Labels) {
+						t.Fatalf("same-ID device of another type changed: %+v", untouched)
+					}
+				})
+			}
+		}
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			device := &resourcepoolv1alpha1.GPUDevice{ObjectMeta: metav1.ObjectMeta{Name: test.deviceName, ResourceVersion: "1"}, Spec: resourcepoolv1alpha1.GPUDeviceSpec{Identity: identity}}
-			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(device).Build()
-			output := &bytes.Buffer{}
-			command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
-			command.SetArgs(test.args)
-			if err := command.Execute(); err != nil {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			updated := &resourcepoolv1alpha1.GPUDevice{}
-			if err := cli.Get(t.Context(), client.ObjectKey{Name: device.Name}, updated); err != nil {
-				t.Fatal(err)
-			}
-			if updated.Spec.PoolRef == nil || updated.Spec.PoolRef.Name != "training-a" {
-				t.Fatalf("updated pool = %#v", updated.Spec.PoolRef)
-			}
-		})
-	}
+}
 
-	invalid := []struct {
+func TestDeviceAssignmentRejectsInvalidIdentity(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
 		args []string
 		want string
 	}{
-		{args: []string{"device", "assign", "--node", "node-a", "--pool", "training-a"}, want: "both --node and --device-id"},
-		{args: []string{"device", "assign", "--device-id", "GPU-A", "--pool", "training-a"}, want: "both --node and --device-id"},
-		{args: []string{"device", "assign", "device-object", "--node", "node-a", "--device-id", "GPU-A", "--pool", "training-a"}, want: "cannot be combined"},
+		{name: "missing ID", args: []string{"--node", "node-a"}, want: "both --node and --device-id"},
+		{name: "missing node", args: []string{"--device-id", "01-aBc_0", "--device-type", "Ascend310P"}, want: "both --node and --device-id"},
+		{name: "mixed forms", args: []string{"device-object", "--node", "node-a", "--device-id", "01-aBc_0"}, want: "cannot be combined"},
+		{name: "object and type", args: []string{"device-object", "--device-type", "Ascend310P"}, want: "cannot be combined"},
+		{name: "object and explicit default", args: []string{"device-object", "--device-type", "NVIDIA"}, want: "cannot be combined"},
+		{name: "object and empty type", args: []string{"device-object", "--device-type="}, want: "cannot be combined"},
+		{name: "empty type", args: []string{"--node", "node-a", "--device-id", "01-aBc_0", "--device-type="}, want: "--device-type must"},
+		{name: "padded type", args: []string{"--node", "node-a", "--device-id", "01-aBc_0", "--device-type", " Ascend310P "}, want: "--device-type must"},
 	}
-	for _, test := range invalid {
-		command := newRootCommand(&commandOptions{client: fake.NewClientBuilder().WithScheme(scheme).Build(), out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
-		command.SetArgs(test.args)
-		if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
-			t.Fatalf("Execute(%v) error = %v, want %q", test.args, err, test.want)
+	for _, operation := range []string{"assign", "unassign"} {
+		for _, test := range tests {
+			t.Run(operation+"/"+test.name, func(t *testing.T) {
+				command := newRootCommand(&commandOptions{client: fake.NewClientBuilder().WithScheme(scheme).Build(), out: &bytes.Buffer{}, errOut: &bytes.Buffer{}})
+				args := append([]string{"device", operation}, test.args...)
+				if operation == "assign" {
+					args = append(args, "--pool", "training-a")
+				}
+				command.SetArgs(args)
+				if err := command.Execute(); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Execute(%v) error = %v, want %q", args, err, test.want)
+				}
+			})
 		}
 	}
 }

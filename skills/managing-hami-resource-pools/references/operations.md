@@ -238,12 +238,48 @@ The pool UID re-read is not an atomic delete precondition for plain `pool delete
 
 A newly created empty pool is correctly observed when its current generation has `Accepted=True`, zero discovered/healthy devices, and `Ready=False` with reason `NoHealthyDevices`. Do not wait for `Ready=True` until a healthy device has actually been assigned and discovered.
 
-Assign by object name, or by the NVIDIA node/device identity pair:
+Assign by object name, or by the complete physical identity from
+`device list -o json`: `spec.identity.nodeName`, `spec.identity.deviceType`,
+and `spec.identity.deviceID`. `--device-type` defaults to `NVIDIA`. For Ascend,
+use the exact, case-sensitive scheduler `commonWord` recorded in the identity,
+such as `Ascend310P` or `Ascend910B`. Preserve the device ID verbatim, including
+case, leading zeros, and separators; it is not necessarily a GPU UUID.
+Object names cannot be combined with `--node`, `--device-type`, or `--device-id`.
 
 ```bash
 "${HAMI[@]}" device assign GPUDEVICE_NAME --pool "$HAMI_POOL"
 "${HAMI[@]}" device assign --node GPU_NODE --device-id GPU_UUID --pool "$HAMI_POOL"
+"${HAMI[@]}" device assign --node NPU_NODE --device-type Ascend310P \
+  --device-id '01-aBc_0' --pool "$HAMI_POOL"
 ```
+
+The Ascend ID above is illustrative; use the exact identity reported by your
+cluster. The same identity flags work for guarded temporary cleanup:
+
+```bash
+"${HAMI[@]}" device unassign --node NPU_NODE --device-type Ascend310P \
+  --device-id '01-aBc_0' \
+  --expected-uid "$HAMI_DEVICE_UID" --expected-pool "$HAMI_POOL"
+```
+
+Run this cleanup only for an originally unassigned device whose UID and pool
+still match the recorded temporary assignment, under exclusive scheduling
+coordination. `device list` and `pool describe` include a `DEVICE-TYPE` column
+so same-node device IDs can be distinguished across backends.
+
+Ascend pool operations require a manager with Ascend resource-pool support,
+CRD chart `0.4.0`, `resourcePoolManager.enabled`, `devices.ascend.enabled`, and
+the corresponding enabled `vnpus.configs` profile. An independently deployed
+Ascend device-plugin also needs its exact ServiceAccount username in
+`resourcePoolManager.additionalTrustedAllocationWriters`. This server-side
+support covers NVIDIA and enabled Ascend profiles; a CLI device-type flag
+does not enable another vendor or install server components.
+
+For Ascend hard-split or unknown mode, inventory `status.corePercent` is
+omitted. Hard-split allocations can report zero core percent; zero or absence
+does not prove idle hardware. `status.vgpuCount` counts sharing slots, while
+each `GPUDevice` represents a physical device. Use allocation and workload
+evidence when deciding whether a device is safe to move.
 
 Before assignment, record the device UID, pool reference, discovery/health status, allocations, and resource version. The dedicated command uses an optimistic update; a conflict means the inventory changed and must be read again. For a temporary lifecycle, select only an originally unassigned spare device and require exclusive scheduling coordination. Do not move the only healthy, allocated, or previously assigned GPU merely to smoke-test the command.
 
@@ -343,7 +379,8 @@ Use the same successful-read pattern for:
 
 - pool creation: same UID, current `observedGeneration`, `Accepted=True`, and the expected empty or populated readiness state;
 - device assignment: same UID, expected `spec.poolRef`, and current `status.observedGeneration`;
-- binding/device/pool cleanup: target absence plus unchanged unrelated baseline mappings.
+- binding/pool deletion: target absence plus unchanged unrelated baseline mappings;
+- device unassignment: the same device UID remains, `spec.poolRef` and the pool label are absent, and unrelated baseline mappings are unchanged.
 
 An expired bound is an unverified result. Stop forward mutation, run only ownership-safe cleanup, and report the last successful snapshot.
 
