@@ -134,6 +134,7 @@ func newPoolCommand(options *commandOptions) *cobra.Command {
 	command.AddCommand(
 		list,
 		newPoolBindingsCommand(options),
+		newPoolRegexBindingsCommand(options),
 		newPoolBindCommand(options),
 		newPoolDescribeCommand(options),
 		newPoolUnbindCommand(options),
@@ -495,7 +496,24 @@ func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
 				return left.Name < right.Name
 			})
 
-			return printPoolDescription(options.out, pool, bindings, devices)
+			regexBindings, err := listRegexBindings(command.Context(), cli, poolName, true)
+			if err != nil {
+				return err
+			}
+			if err := printPoolDescription(options.out, pool, bindings, devices); err != nil {
+				return err
+			}
+			if len(regexBindings.Items) == 0 {
+				return nil
+			}
+			fmt.Fprintln(options.out, "\nRegex bindings:")
+			writer := newTableWriter(options.out)
+			fmt.Fprintln(writer, "  ID\tNAMESPACE REGEX")
+			for i := range regexBindings.Items {
+				rule := &regexBindings.Items[i]
+				fmt.Fprintf(writer, "  %s\t%q\n", rule.GetName(), regexBindingPattern(rule))
+			}
+			return writer.Flush()
 		},
 	}
 }
@@ -617,7 +635,7 @@ func newPoolDeleteCommand(options *commandOptions) *cobra.Command {
 			return nil
 		},
 	}
-	command.Flags().BoolVar(&force, "force", false, "Delete ResourcePoolBindings and unassign GPUDevices that reference the pool")
+	command.Flags().BoolVar(&force, "force", false, "Delete namespace and regex bindings and unassign GPUDevices that reference the pool")
 	return command
 }
 
@@ -641,6 +659,10 @@ func deleteResourcePoolReferences(ctx context.Context, cli client.Client, out io
 		})
 		sort.Slice(devices.Items, func(i, j int) bool { return devices.Items[i].Name < devices.Items[j].Name })
 
+		regexBindings, err := listRegexBindings(ctx, cli, pool.Name, true)
+		if err != nil {
+			return err
+		}
 		matchingBindings := 0
 		for i := range bindings.Items {
 			if bindings.Items[i].Spec.PoolRef.Name == pool.Name {
@@ -655,7 +677,7 @@ func deleteResourcePoolReferences(ctx context.Context, cli client.Client, out io
 		}
 		currentPool := &resourcepoolv1alpha1.ResourcePool{}
 		if err := cli.Get(ctx, client.ObjectKey{Name: pool.Name}, currentPool); err != nil {
-			if apierrors.IsNotFound(err) && matchingBindings == 0 && matchingDevices == 0 {
+			if apierrors.IsNotFound(err) && matchingBindings == 0 && len(regexBindings.Items) == 0 && matchingDevices == 0 {
 				return nil
 			}
 			return fmt.Errorf("re-read ResourcePool: %w", err)
@@ -663,14 +685,15 @@ func deleteResourcePoolReferences(ctx context.Context, cli client.Client, out io
 		if currentPool.UID != pool.UID {
 			return fmt.Errorf("ResourcePool UID is %q, expected %q", currentPool.UID, pool.UID)
 		}
-		if matchingBindings == 0 && matchingDevices == 0 {
+		if matchingBindings == 0 && len(regexBindings.Items) == 0 && matchingDevices == 0 {
 			return nil
 		}
 		if cleanupPass >= maxPoolReferenceCleanupPasses {
 			return fmt.Errorf(
-				"references did not stabilize after %d cleanup passes: %d ResourcePoolBindings and %d GPUDevices still reference the pool",
+				"references did not stabilize after %d cleanup passes: %d ResourcePoolBindings, %d ResourcePoolRegexBindings and %d GPUDevices still reference the pool",
 				maxPoolReferenceCleanupPasses,
 				matchingBindings,
+				len(regexBindings.Items),
 				matchingDevices,
 			)
 		}
@@ -687,6 +710,14 @@ func deleteResourcePoolReferences(ctx context.Context, cli client.Client, out io
 				return fmt.Errorf("delete ResourcePoolBinding %s/%s: %w", binding.Namespace, binding.Name, err)
 			}
 			fmt.Fprintf(out, "resourcepoolbinding.resource.hami.io/%s deleted from namespace %s\n", binding.Name, binding.Namespace)
+		}
+
+		for i := range regexBindings.Items {
+			rule := &regexBindings.Items[i]
+			if err := deleteRegexBinding(ctx, cli, rule); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "%s/%s deleted\n", regexBindingResource, rule.GetName())
 		}
 
 		for i := range devices.Items {

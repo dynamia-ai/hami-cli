@@ -37,6 +37,20 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://storage.dynamia.ai/hami-cli/install.sh | HAMI_CLI_AGENT=codex sh
 ```
 
+## 资源池正则绑定
+
+目标集群需要安装 `ResourcePoolRegexBinding` CRD，并运行支持正则绑定的 Resource Pool Manager。正则采用 Go RE2，匹配完整的命名空间名称。匹配到的现有和未来命名空间都可以使用该资源池。
+
+```bash
+hami-cli pool regex-bindings create training 'kube-.*'
+hami-cli pool regex-bindings list --pool training
+hami-cli pool describe training
+hami-cli pool regex-bindings update RULE_ID 'kube-(public|system)'
+hami-cli pool regex-bindings delete RULE_ID
+```
+
+创建时无需提供规则名；CLI 生成 ID，编辑时保持不变。同一个池中不能重复使用完全相同的表达式，不同池可各自创建相同的表达式。`pool delete --force` 也会清理指向目标池的正则规则。
+
 ## Ascend 设备资源池
 
 Ascend 资源池需要服务端具备对应支持，并安装 `0.4.0` 版 CRD Chart，启用
