@@ -81,70 +81,15 @@ func TestResolveCLIBuildInfo(t *testing.T) {
 			}
 			output := parseCLIBuildInfoOutput(t, got.String())
 			for field, want := range map[string]string{
-				"version":     test.want.Version,
-				"revision":    test.want.Revision,
-				"commit date": test.want.CommitDate,
-				"build date":  test.want.BuildDate,
+				"version":           test.want.Version,
+				"resource pool API": "resource.hami.io/v1alpha1",
+				"revision":          test.want.Revision,
+				"commit date":       test.want.CommitDate,
+				"build date":        test.want.BuildDate,
 			} {
 				if output[field] != want {
 					t.Errorf("version output %q = %q, want %q", field, output[field], want)
 				}
-			}
-		})
-	}
-}
-
-func TestResolveCLIBuildInfoResourcePoolAPIRevision(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		buildInfo *debug.BuildInfo
-		want      string
-	}{
-		{
-			name: "pseudo-version",
-			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
-				Path:    resourcePoolAPIModulePath,
-				Version: "v0.0.0-20260824104039-b85d4c6f1d21",
-			}}},
-			want: "b85d4c6f1d21",
-		},
-		{
-			name: "replacement pseudo-version",
-			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
-				Path: resourcePoolAPIModulePath,
-				Replace: &debug.Module{
-					Path:    resourcePoolAPIModulePath,
-					Version: "v0.0.0-20260824110000-cafebabefeed",
-				},
-			}}},
-			want: "cafebabefeed",
-		},
-		{
-			name:      "missing dependency",
-			buildInfo: &debug.BuildInfo{},
-			want:      "unknown",
-		},
-		{
-			name: "tagged dependency",
-			buildInfo: &debug.BuildInfo{Deps: []*debug.Module{{
-				Path:    resourcePoolAPIModulePath,
-				Version: "v1.2.3",
-			}}},
-			want: "unknown",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got := resolveCLIBuildInfo("devel", "unknown", "unknown", test.buildInfo)
-			if got.ResourcePoolAPIRevision != test.want {
-				t.Errorf("ResourcePoolAPIRevision = %q, want %q", got.ResourcePoolAPIRevision, test.want)
-			}
-			output := parseCLIBuildInfoOutput(t, got.String())
-			if output["resource pool API"] != test.want {
-				t.Errorf("version output resource pool API = %q, want %q", output["resource pool API"], test.want)
 			}
 		})
 	}

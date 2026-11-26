@@ -23,7 +23,6 @@ env:
   BUILDX_VERSION: v0.36.1
   BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
   DOCKER_BUILD_RECORD_UPLOAD: "false"
-  GOPRIVATE: github.com/dynamia-ai/*
   GOLANGCI_LINT_VERSION: v2.13.1
   GORELEASER_VERSION: v2.18.0
   OSSUTIL_VERSION: 2.3.0
@@ -103,11 +102,6 @@ jobs:
             echo "- Revision: \`$revision\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Validate private module credential
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -122,10 +116,6 @@ jobs:
           install-only: true
 
       - name: Run release checks
-        env:
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
       - name: Build snapshot artifacts with GoReleaser
@@ -136,9 +126,6 @@ jobs:
           args: release --snapshot --clean
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/
 
       - name: Verify release archive contents
         env:

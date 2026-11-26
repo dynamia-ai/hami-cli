@@ -8,31 +8,18 @@ ARG VERSION=devel
 ARG REVISION=unknown
 ARG BUILD_DATE=unknown
 
-ENV GOPRIVATE=github.com/dynamia-ai/*
-
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates git
-
 COPY go.mod go.sum ./
-RUN --mount=type=secret,id=github_token,required=true \
-    set -eu; \
-    token="$(cat /run/secrets/github_token)"; \
-    git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"; \
-    GOWORK=off go mod download; \
-    rm -f "${HOME}/.gitconfig"
+RUN GOWORK=off go mod download
 
 COPY *.go ./
+COPY internal/ ./internal/
 COPY skills/ ./skills/
-RUN --mount=type=secret,id=github_token,required=true \
-    set -eu; \
-    token="$(cat /run/secrets/github_token)"; \
-    git config --global url."https://x-access-token:${token}@github.com/".insteadOf "https://github.com/"; \
-    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK=off \
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK=off \
       go build -trimpath \
       -ldflags "-s -w -X main.cliVersion=${VERSION} -X main.cliRevision=${REVISION} -X main.cliBuildDate=${BUILD_DATE}" \
-      -o /out/hami-cli .; \
-    rm -f "${HOME}/.gitconfig"
+      -o /out/hami-cli .
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
