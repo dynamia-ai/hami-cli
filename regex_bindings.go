@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 
 	resourcepoolv1alpha1 "github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api/v1alpha1"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -66,20 +69,39 @@ func checkRegexBindingDuplicate(list *unstructured.UnstructuredList, pool, patte
 	return nil
 }
 
-func validateNamespaceRegex(pattern string) error {
+func compileNamespaceRegex(pattern string) (*regexp.Regexp, error) {
 	if len(pattern) == 0 || len(pattern) > 256 {
-		return fmt.Errorf("namespace regex must contain 1 to 256 bytes")
+		return nil, fmt.Errorf("namespace regex must contain 1 to 256 bytes")
 	}
-	if _, err := regexp.Compile(pattern); err != nil {
-		return fmt.Errorf("invalid namespace regex: %w", err)
+	// Anchor the parsed expression exactly as Resource Pool Manager does.
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return nil, fmt.Errorf("invalid namespace regex: %w", err)
+	}
+	return regexp.Compile(`\A(?:` + parsed.String() + `)\z`)
+}
+
+func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
+	var namespaces corev1.NamespaceList
+	if err := cli.List(ctx, &namespaces); err != nil {
+		return fmt.Errorf("list namespaces for preview: %w", err)
+	}
+	var matches []string
+	for i := range namespaces.Items {
+		name := namespaces.Items[i].Name
+		if pattern.MatchString(name) {
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, len(matches))
+	for _, name := range matches {
+		fmt.Fprintln(out, name)
 	}
 	return nil
 }
 
 func createRegexBinding(ctx context.Context, cli client.Client, pool, pattern string) (*unstructured.Unstructured, error) {
-	if err := validateNamespaceRegex(pattern); err != nil {
-		return nil, err
-	}
 	list, err := listRegexBindings(ctx, cli, pool, false)
 	if err != nil {
 		return nil, err
@@ -154,12 +176,20 @@ func newPoolRegexBindingsCommand(options *commandOptions) *cobra.Command {
 	}
 	list.Flags().StringVar(&pool, "pool", "", "List rules for this resource pool only")
 	addOutputFlag(list)
+	var preview bool
 	create := &cobra.Command{
 		Use: "create POOL REGEX", Short: "Grant pool access to namespaces matching a full RE2 expression", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			pattern, err := compileNamespaceRegex(args[1])
+			if err != nil {
+				return err
+			}
 			cli, err := options.getClient()
 			if err != nil {
 				return err
+			}
+			if preview {
+				return previewRegexBinding(cmd.Context(), cli, options.out, args[0], pattern)
 			}
 			rule, err := createRegexBinding(cmd.Context(), cli, args[0], args[1])
 			if err != nil {
@@ -169,10 +199,11 @@ func newPoolRegexBindingsCommand(options *commandOptions) *cobra.Command {
 			return nil
 		},
 	}
+	create.Flags().BoolVar(&preview, "preview", false, "List and count currently matching namespaces without creating a rule")
 	update := &cobra.Command{
 		Use: "update ID REGEX", Short: "Change a rule's regex without changing its ID or pool", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateNamespaceRegex(args[1]); err != nil {
+			if _, err := compileNamespaceRegex(args[1]); err != nil {
 				return err
 			}
 			cli, err := options.getClient()

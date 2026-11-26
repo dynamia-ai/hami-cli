@@ -2,15 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	resourcepoolv1alpha1 "github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestPoolRegexBindingLifecycle(t *testing.T) {
@@ -80,5 +84,52 @@ func TestPoolRegexBindingLifecycle(t *testing.T) {
 	mustRun("regex-bindings", "delete", other.GetName())
 	if err := cli.Get(ctx, client.ObjectKey{Name: other.GetName()}, regexBindingObject()); !apierrors.IsNotFound(err) {
 		t.Fatalf("get explicitly deleted rule: %v", err)
+	}
+}
+
+func TestPoolRegexBindingPreview(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	var namespaces []client.Object
+	for _, name := range []string{"team-b", "prefix-team-a", "team-a", "team-b-suffix"} {
+		namespaces = append(namespaces, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	for _, tc := range []struct {
+		name, pattern, want string
+		forbidden           bool
+	}{
+		{name: "whole names and sorted matches", pattern: "team-a|team-b", want: "Pool: training\nMatching namespaces: 2\nteam-a\nteam-b\n"},
+		{name: "zero matches", pattern: "absent", want: "Pool: training\nMatching namespaces: 0\n"},
+		{name: "namespace list forbidden", pattern: ".*", forbidden: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespaces...).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if tc.forbidden {
+						return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", nil)
+					}
+					return c.List(ctx, list, opts...)
+				},
+				Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+					t.Fatal("preview attempted to create a resource")
+					return nil
+				},
+			}).Build()
+			var out bytes.Buffer
+			cmd := newRootCommand(&commandOptions{client: cli, out: &out, errOut: &out})
+			cmd.SetArgs([]string{"pool", "regex-bindings", "create", "training", tc.pattern, "--preview"})
+			err := cmd.ExecuteContext(t.Context())
+			if tc.forbidden {
+				if !apierrors.IsForbidden(err) || strings.Contains(out.String(), "Matching namespaces:") {
+					t.Fatalf("list denied: err = %v, output = %q", err, out.String())
+				}
+				return
+			}
+			if err != nil || out.String() != tc.want {
+				t.Fatalf("preview: err = %v, output = %q, want %q", err, out.String(), tc.want)
+			}
+		})
 	}
 }
