@@ -1,5 +1,7 @@
 # hami-cli
 
+面向集群管理员和平台运维人员的完整场景化使用文档见[用户指南](docs/user-guide.md)。
+
 ## 一键安装
 
 Linux 和 macOS：
