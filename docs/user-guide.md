@@ -33,8 +33,6 @@ curl -fsSL https://storage.dynamia.ai/hami-cli/install.sh | \
   HAMI_CLI_VERSION=v0.1.0 HAMI_CLI_INSTALL_DIR="$HOME/bin" sh
 ```
 
-Windows 环境不使用安装脚本，从发布包下载 `windows/amd64` 归档解压后使用。
-
 安装脚本会校验归档的 SHA-256 摘要，然后依次完成三项配置：
 
 - 将可执行文件安装到 `~/.local/bin/hami-cli`（默认路径）。
@@ -55,11 +53,34 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://storage.dynamia.ai/hami-cli/install.sh | HAMI_CLI_AGENT=codex sh
 ```
 
+### 从 GitHub Releases 手动下载
+
+在 Windows 环境下，或在受控网络中不便直接执行远程安装脚本时，可以从公开的 [GitHub Releases](https://github.com/dynamia-ai/hami-cli/releases) 页面下载目标版本（例如 `v0.1.0`）的平台归档。每个版本均提供五个平台的 `.tar.gz` 归档、对应的逐文件 `.sha256`、汇总校验文件 `checksums.txt` 和容器镜像摘要 `image-digest.txt`：
+
+| 操作系统 | 支持架构 | 归档内可执行文件 |
+| --- | --- | --- |
+| Linux | `amd64`、`arm64` | `hami-cli` |
+| macOS | `amd64`、`arm64` | `hami-cli` |
+| Windows | `amd64` | `hami-cli.exe` |
+
+以 Linux `amd64` 的 `v0.1.0` 为例，下载归档和同名 `.sha256` 文件后，核对摘要并安装到 `~/.local/bin`（macOS 将 `sha256sum` 替换为 `shasum -a 256`）：
+
+```bash
+printf '%s  %s\n' "$(cat hami-cli_v0.1.0_linux_amd64.tar.gz.sha256)" \
+  hami-cli_v0.1.0_linux_amd64.tar.gz | sha256sum -c -
+tar -xzf hami-cli_v0.1.0_linux_amd64.tar.gz
+install -m 0755 hami-cli_v0.1.0_linux_amd64/hami-cli ~/.local/bin/hami-cli
+```
+
+如果下载了全部平台归档和 `checksums.txt`，可以在同一目录运行 `sha256sum -c checksums.txt` 批量校验。Windows 用户解压 `hami-cli_v0.1.0_windows_amd64.tar.gz` 后，将目录内的 `hami-cli.exe` 放入 `PATH` 目录即可。
+
+手动安装不会自动配置 shell 补全和内置 Skill。如需启用，安装后通过 `hami-cli completion --help` 查看补全生成命令，并参考后文安装内置 Skill。
+
 ### 作为 kubectl 插件或容器镜像运行
 
 团队习惯统一通过 `kubectl` 操作集群时，可以将 `hami-cli` 二进制复制或软链接为 `kubectl-hami_cli` 并放入 `PATH` 目录，之后直接执行 `kubectl hami-cli`。
 
-在 CI 流水线或不方便安装本地二进制的跳板机上，可以直接运行多架构容器镜像 `ghcr.io/dynamia-ai/hami-cli`（镜像入口点已设为 `hami-cli`）。将本地 `kubeconfig` 以只读方式挂载进容器，替换 `<IMAGE_TAG>` 为目标版本标签并显式指定 `--context`：
+在 CI 流水线或不方便安装本地二进制的跳板机上，可以直接运行多架构容器镜像 `ghcr.io/dynamia-ai/hami-cli`（支持 `linux/amd64` 和 `linux/arm64`，镜像入口点已设为 `hami-cli`）。将本地 `kubeconfig` 以只读方式挂载进容器，替换 `<IMAGE_TAG>` 为目标版本标签（需要固定不可变镜像时，使用对应 Release 中 `image-digest.txt` 提供的摘要，以 `ghcr.io/dynamia-ai/hami-cli@<digest>` 引用）并显式指定 `--context`：
 
 ```bash
 docker run --rm \
@@ -72,7 +93,7 @@ docker run --rm \
   pool list
 ```
 
-如果 `kubeconfig` 中的集群地址是 `127.0.0.1` 或 `localhost`，容器内会指向容器自身。这种情况下，用宿主机网关地址和实际 API 端口覆盖 `--server`，并传入当前集群配置里的 `tls-server-name` 或服务端证书 SAN 对应的 `--tls-server-name`，不要使用 `--insecure-skip-tls-verify`。在 macOS 的 Docker Desktop 或 OrbStack 上按如下方式调用（Linux Docker 可能还需要补充 `--add-host host.docker.internal:host-gateway`）：
+如果 `kubeconfig` 中的集群地址是 `127.0.0.1` 或 `localhost`，容器内会指向容器自身。在 macOS 的 Docker Desktop 或 OrbStack 上，用宿主机网关地址和实际 API 端口覆盖 `--server`，并传入当前集群配置里的 `tls-server-name` 或服务端证书 SAN 对应的 `--tls-server-name`，不要使用 `--insecure-skip-tls-verify`：
 
 ```bash
 docker run --rm \
@@ -86,6 +107,8 @@ docker run --rm \
   --tls-server-name NAME_FROM_KUBECONFIG_OR_CERTIFICATE \
   pool list
 ```
+
+在 Linux Docker 上，如果 API Server 仅监听宿主机回环地址 `127.0.0.1`，`--add-host host.docker.internal:host-gateway` 指向宿主机网桥而非回环地址，无法连通该端口；此时改用 `--network host` 配合 `kubeconfig` 中的原回环地址（或通过端口转发访问），并保持 TLS 校验开启。只有在 API Server 监听宿主机非回环网卡时，才适用 `--add-host host.docker.internal:host-gateway`。
 
 如果 `kubeconfig` 引用了外部 CA、客户端证书或私钥文件，将这些文件只读挂载到容器内与 `kubeconfig` 引用路径一致的位置（或同步修改挂载后 `kubeconfig` 中的文件路径）。`hami-cli` 容器镜像基于 distroless，无法执行 `kubeconfig` 中的外部 `exec` 认证插件，依赖这类插件的集群改用宿主机二进制。
 
