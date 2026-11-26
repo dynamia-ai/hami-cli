@@ -42,6 +42,7 @@ test:
 	GOWORK=off $(GO) test -race $(GO_PACKAGES)
 	bash hack/install_test.sh
 	bash hack/verify-release-archives_test.sh
+	bash hack/publish-github-release_test.sh
 
 verify-build:
 	GOWORK=off CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o /dev/null .
@@ -79,7 +80,7 @@ build-image-arm64:
 
 package-release:
 	RELEASE_VERSION="$(VERSION)" $(GORELEASER) release --snapshot --clean
-	bash hack/verify-release-archives.sh dist
+	bash hack/verify-release-archives.sh dist "$(VERSION)"
 
 release-check:
 	$(GORELEASER) check

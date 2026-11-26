@@ -141,7 +141,9 @@ jobs:
           GIT_CONFIG_VALUE_0: https://github.com/
 
       - name: Verify release archive contents
-        run: bash hack/verify-release-archives.sh dist
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: bash hack/verify-release-archives.sh dist "$VERSION"
 
       - name: Stage one-line installer
         if: steps.release.outputs.version == 'latest'
@@ -196,6 +198,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
       - name: Upload rolling image payload
         id: image-artifact
@@ -206,6 +209,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
   validate_distribution:
     name: Validate rolling distribution configuration
@@ -238,7 +242,7 @@ jobs:
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
           [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$VERSION" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
-          bash release-control/hack/verify-release-archives.sh dist
+          bash release-control/hack/verify-release-archives.sh dist "$VERSION"
           if [[ "$VERSION" = latest ]]; then
             trusted_installers="$(mktemp -d)"
             bash release-control/hack/prepare-installers.sh "$trusted_installers"
@@ -303,7 +307,7 @@ jobs:
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
-          bash release-control/hack/verify-release-archives.sh dist
+          bash release-control/hack/verify-release-archives.sh dist "$VERSION"
 
       - name: Install ossutil
         shell: bash
@@ -363,7 +367,7 @@ jobs:
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
-          bash release-control/hack/verify-release-archives.sh dist
+          bash release-control/hack/verify-release-archives.sh dist "$VERSION"
 
       - name: Verify AWS CLI
         run: |
@@ -489,10 +493,7 @@ jobs:
 
   cleanup:
     name: Delete rolling release payloads
-    if: >-
-      ${{ always() &&
-          (needs.build.outputs.binary-artifact-id != '' ||
-           needs.build.outputs.image-artifact-id != '') }}
+    if: needs.summarize.result == 'success'
     needs: [build, publish_oss, publish_s3, publish_ghcr, summarize]
     runs-on: ubuntu-latest
     timeout-minutes: 5

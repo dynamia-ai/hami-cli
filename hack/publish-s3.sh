@@ -3,12 +3,12 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-mode="${1:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
-version="${2:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
-dist_dir="${3:?usage: publish-s3.sh stable|mutable VERSION DIST_DIR}"
+mode="${1:?usage: publish-s3.sh tagged|mutable VERSION DIST_DIR}"
+version="${2:?usage: publish-s3.sh tagged|mutable VERSION DIST_DIR}"
+dist_dir="${3:?usage: publish-s3.sh tagged|mutable VERSION DIST_DIR}"
 
 case "$mode" in
-  stable|mutable)
+  tagged|mutable)
     cache_control='no-cache,max-age=0,must-revalidate'
     ;;
   *)
@@ -32,22 +32,16 @@ export AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
 
 aws_args=(--endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" --no-cli-pager)
 
-shopt -s nullglob
+bash "$script_dir/verify-release-archives.sh" "$dist_dir" "$version"
 artifacts=("$dist_dir"/*.tar.gz "$dist_dir"/*.tar.gz.sha256)
-if [[ "$mode" = stable ]]; then
+if [[ "$mode" = tagged ]]; then
+  test -s "$dist_dir/image-digest.txt"
   artifacts+=("$dist_dir/image-digest.txt")
 fi
 if [[ "$version" = latest ]]; then
+  test -s "$dist_dir/install-r2.sh"
   artifacts+=("$dist_dir/install-r2.sh")
 fi
-expected_count=10
-[[ "$mode" = stable ]] && expected_count=11
-[[ "$version" = latest ]] && expected_count=11
-test "${#artifacts[@]}" -eq "$expected_count"
-for archive in "$dist_dir"/*.tar.gz; do
-  [[ "${archive##*/}" = "hami-cli_${version}_"*.tar.gz ]]
-done
-bash "$script_dir/verify-release-archives.sh" "$dist_dir"
 
 for artifact in "${artifacts[@]}"; do
   name="${artifact##*/}"

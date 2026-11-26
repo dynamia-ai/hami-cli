@@ -6,6 +6,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
+# Keep the installer from using the caller's Zsh configuration directory.
+unset ZDOTDIR
+
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
@@ -26,6 +29,13 @@ release_dir="$fixture_root/hami-cli/$version"
 fallback_release_dir="$fallback_fixture_root/hami-cli/$version"
 archive_root="$test_dir/archive/hami-cli_${version}_${platform}"
 mkdir -p "$release_dir" "$fallback_release_dir" "$archive_root" "$test_dir/mock-bin" "$test_dir/home"
+
+cat > "$test_dir/mock-bin/zsh" <<'EOF'
+#!/bin/sh
+printf '__HAMI_CLI_ZDOTDIR__%s\n' "${ZDOTDIR:-$HOME}"
+EOF
+chmod 0755 "$test_dir/mock-bin/zsh"
+export SHELL="$test_dir/mock-bin/zsh"
 
 cat > "$archive_root/hami-cli" <<'EOF'
 #!/bin/sh
@@ -107,6 +117,7 @@ test "$(cat "$test_dir/home/.local/share/bash-completion/completions/hami-cli")"
   'bash completion'
 test "$(cat "$test_dir/home/.local/share/zsh/site-functions/_hami-cli")" = \
   'zsh completion'
+grep -Fq '# >>> hami-cli completion (managed by install.sh) >>>' "$test_dir/home/.zshrc"
 test "$(cat "$test_dir/home/.config/fish/completions/hami-cli.fish")" = \
   'fish completion'
 grep -Fx "Installed hami-cli to $test_dir/home/.local/bin/hami-cli" "$test_dir/install.out"

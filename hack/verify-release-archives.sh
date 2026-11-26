@@ -2,17 +2,17 @@
 
 set -euo pipefail
 
-dist_dir="${1:?usage: verify-release-archives.sh DIST_DIR}"
+dist_dir="${1:?usage: verify-release-archives.sh DIST_DIR VERSION}"
+version="${2:?usage: verify-release-archives.sh DIST_DIR VERSION}"
+[[ "$version" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
 
+# Keep this distribution matrix in sync with .goreleaser.yaml.
+platforms=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64)
 shopt -s nullglob
 archives=("$dist_dir"/*.tar.gz)
-if ((${#archives[@]} == 0)); then
-  echo "no release archives found in $dist_dir" >&2
-  exit 1
-fi
 checksums=("$dist_dir"/*.tar.gz.sha256)
-if ((${#checksums[@]} != ${#archives[@]})); then
-  echo "each release archive must have one checksum file in $dist_dir" >&2
+if ((${#archives[@]} != ${#platforms[@]} || ${#checksums[@]} != ${#platforms[@]})); then
+  echo "expected one archive and one checksum per supported platform in $dist_dir" >&2
   exit 1
 fi
 
@@ -25,32 +25,23 @@ else
   exit 1
 fi
 
-for archive in "${archives[@]}"; do
-  if ! tar -tzf "$archive" >/dev/null; then
-    echo "invalid release archive: $archive" >&2
+for platform in "${platforms[@]}"; do
+  name="hami-cli_${version}_$platform"
+  archive="$dist_dir/$name.tar.gz"
+  if [[ ! -f "$archive" ]]; then
+    echo "missing release archive: $archive" >&2
     exit 1
   fi
 
-  files=()
-  while IFS= read -r entry; do
-    if [[ "$entry" != */ ]]; then
-      files+=("$entry")
-    fi
-  done < <(tar -tzf "$archive")
-
-  if ((${#files[@]} != 1)); then
-    echo "release archive must contain exactly one file: $archive" >&2
-    printf '  %s\n' "${files[@]}" >&2
+  binary=hami-cli
+  [[ "$platform" = windows_* ]] && binary=hami-cli.exe
+  entry="$name/$binary"
+  if ! listing="$(tar -tzf "$archive")" || ! types="$(tar -tvzf "$archive" | cut -c1)" ||
+    ! { [[ "$listing" = "$entry" && "$types" = "-" ]] ||
+        [[ "$listing" = "$name/"$'\n'"$entry" && "$types" = $'d\n-' ]]; }; then
+    echo "expected only the regular file $name/$binary in $archive" >&2
     exit 1
   fi
-
-  case "${files[0]##*/}" in
-    hami-cli | hami-cli.exe) ;;
-    *)
-      echo "unexpected release archive file in $archive: ${files[0]}" >&2
-      exit 1
-      ;;
-  esac
 
   checksum="$archive.sha256"
   if [[ ! -f "$checksum" ]]; then
