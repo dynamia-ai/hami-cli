@@ -500,25 +500,12 @@ func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := printPoolDescription(options.out, pool, bindings, devices); err != nil {
-				return err
-			}
-			if len(regexBindings.Items) == 0 {
-				return nil
-			}
-			fmt.Fprintln(options.out, "\nRegex bindings:")
-			writer := newTableWriter(options.out)
-			fmt.Fprintln(writer, "  ID\tNAMESPACE REGEX")
-			for i := range regexBindings.Items {
-				rule := &regexBindings.Items[i]
-				fmt.Fprintf(writer, "  %s\t%q\n", rule.GetName(), regexBindingPattern(rule))
-			}
-			return writer.Flush()
+			return printPoolDescription(options.out, pool, bindings, regexBindings, devices)
 		},
 	}
 }
 
-func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, devices *resourcepoolv1alpha1.GPUDeviceList) error {
+func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, regexBindings *unstructured.UnstructuredList, devices *resourcepoolv1alpha1.GPUDeviceList) error {
 	nodePolicy, gpuPolicy := "<unset>", "<unset>"
 	cpuQuota, memoryQuota := poolQuotaValues(pool)
 	if pool.Spec.WorkloadDefaults != nil && pool.Spec.WorkloadDefaults.SchedulingPolicy != nil {
@@ -557,7 +544,7 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 		return err
 	}
 
-	fmt.Fprintln(out, "\nNamespaces:")
+	fmt.Fprintln(out, "\nExplicit namespace bindings:")
 	if len(bindings.Items) == 0 {
 		fmt.Fprintln(out, "  <none>")
 	} else {
@@ -566,6 +553,19 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 		for i := range bindings.Items {
 			binding := &bindings.Items[i]
 			fmt.Fprintf(writer, "  %s\t%s\t%s\n", binding.Namespace, binding.Name, bindingConditionStatus(binding))
+		}
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if len(regexBindings.Items) > 0 {
+		fmt.Fprintln(out, "\nRegex bindings:")
+		writer = newTableWriter(out)
+		fmt.Fprintln(writer, "  ID\tNAMESPACE REGEX")
+		for i := range regexBindings.Items {
+			rule := &regexBindings.Items[i]
+			fmt.Fprintf(writer, "  %s\t%q\n", rule.GetName(), regexBindingPattern(rule))
 		}
 		if err := writer.Flush(); err != nil {
 			return err
@@ -601,42 +601,81 @@ func quotaLedgerState(pool *resourcepoolv1alpha1.ResourcePool) string {
 }
 
 func newPoolDeleteCommand(options *commandOptions) *cobra.Command {
-	var force bool
+	var force, wait bool
+	var waitTimeout time.Duration
 	command := &cobra.Command{
 		Use:   "delete NAME",
 		Short: "Delete a resource pool",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
+			if command.Flags().Changed("wait-timeout") && !wait {
+				return fmt.Errorf("--wait-timeout requires --wait")
+			}
+			if wait && waitTimeout <= 0 {
+				return fmt.Errorf("--wait-timeout must be positive")
+			}
+			ctx := command.Context()
 			cli, err := options.getClient()
 			if err != nil {
 				return err
 			}
 			poolName := args[0]
 			pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: poolName}}
-			if force {
-				if err := cli.Get(command.Context(), client.ObjectKey{Name: poolName}, pool); err != nil {
-					return fmt.Errorf("get resource pool %q before forced deletion: %w", poolName, err)
+			var deleteOptions []client.DeleteOption
+			if force || wait {
+				if err := cli.Get(ctx, client.ObjectKey{Name: poolName}, pool); err != nil {
+					return fmt.Errorf("get resource pool %q before deletion: %w", poolName, err)
 				}
 				if pool.UID == "" {
 					return fmt.Errorf("resource pool %q has no UID", poolName)
 				}
-				if err := deleteResourcePoolReferences(command.Context(), cli, options.out, pool); err != nil {
+				deleteOptions = append(deleteOptions, client.Preconditions{UID: &pool.UID})
+			}
+			if force {
+				if err := deleteResourcePoolReferences(ctx, cli, options.out, pool); err != nil {
 					return fmt.Errorf("remove references to resource pool %q: %w", poolName, err)
 				}
 			}
-			deleteOptions := []client.DeleteOption{}
-			if force {
-				deleteOptions = append(deleteOptions, client.Preconditions{UID: &pool.UID})
-			}
-			if err := cli.Delete(command.Context(), pool, deleteOptions...); err != nil && (!force || !apierrors.IsNotFound(err)) {
-				return fmt.Errorf("delete resource pool %q: %w", poolName, err)
+			if err := cli.Delete(ctx, pool, deleteOptions...); err != nil {
+				if !force || !apierrors.IsNotFound(err) {
+					return fmt.Errorf("delete resource pool %q: %w", poolName, err)
+				}
+			} else {
+				fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s deletion requested\n", poolName)
+				if !wait {
+					return nil
+				}
+				if err := waitForPoolDeletion(ctx, cli, pool, waitTimeout); err != nil {
+					return err
+				}
 			}
 			fmt.Fprintf(options.out, "resourcepool.resource.hami.io/%s deleted\n", poolName)
 			return nil
 		},
 	}
 	command.Flags().BoolVar(&force, "force", false, "Delete namespace and regex bindings and unassign GPUDevices that reference the pool")
+	command.Flags().BoolVar(&wait, "wait", true, "Wait for the pool to disappear after requesting deletion")
+	command.Flags().DurationVar(&waitTimeout, "wait-timeout", 2*time.Minute, "Maximum time to wait after requesting deletion")
 	return command
+}
+
+func waitForPoolDeletion(ctx context.Context, cli client.Reader, pool *resourcepoolv1alpha1.ResourcePool, timeout time.Duration) error {
+	key := client.ObjectKeyFromObject(pool)
+	err := k8swait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		var current resourcepoolv1alpha1.ResourcePool
+		err := cli.Get(ctx, key, &current)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return current.UID != pool.UID, nil
+	})
+	if err != nil {
+		return fmt.Errorf("deletion requested for resource pool %q, could not confirm removal: %w; check with 'kubectl get resourcepool %s'", pool.Name, err, pool.Name)
+	}
+	return nil
 }
 
 const maxPoolReferenceCleanupPasses = 5

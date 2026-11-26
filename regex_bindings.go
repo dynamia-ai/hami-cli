@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"regexp/syntax"
 	"sort"
+	"strings"
 
 	resourcepoolv1alpha1 "github.com/dynamia-ai/hami-enterprise/pkg/resourcepool/api/v1alpha1"
 	"github.com/spf13/cobra"
@@ -201,7 +202,7 @@ func newPoolRegexBindingsCommand(options *commandOptions) *cobra.Command {
 	}
 	create.Flags().BoolVar(&preview, "preview", false, "List and count currently matching namespaces without creating a rule")
 	update := &cobra.Command{
-		Use: "update ID REGEX", Short: "Change a rule's regex without changing its ID or pool", Args: cobra.ExactArgs(2),
+		Use: "update ID_OR_RESOURCE_NAME REGEX", Short: "Change a rule's regex without changing its ID or pool", Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if _, err := compileNamespaceRegex(args[1]); err != nil {
 				return err
@@ -211,43 +212,45 @@ func newPoolRegexBindingsCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
+			id := strings.TrimPrefix(args[0], regexBindingResource+"/")
 			rule := regexBindingObject()
-			if err := cli.Get(ctx, client.ObjectKey{Name: args[0]}, rule); err != nil {
-				return fmt.Errorf("get ResourcePoolRegexBinding %q: %w", args[0], err)
+			if err := cli.Get(ctx, client.ObjectKey{Name: id}, rule); err != nil {
+				return fmt.Errorf("get ResourcePoolRegexBinding %q: %w", id, err)
 			}
 			pool := regexBindingPool(rule)
 			list, err := listRegexBindings(ctx, cli, pool, false)
 			if err != nil {
 				return err
 			}
-			if err := checkRegexBindingDuplicate(list, pool, args[1], args[0]); err != nil {
+			if err := checkRegexBindingDuplicate(list, pool, args[1], id); err != nil {
 				return err
 			}
 			if err := unstructured.SetNestedField(rule.Object, args[1], "spec", "namespaceRegex"); err != nil {
 				return err
 			}
 			if err := cli.Update(ctx, rule); err != nil {
-				return fmt.Errorf("update ResourcePoolRegexBinding %q: %w", args[0], err)
+				return fmt.Errorf("update ResourcePoolRegexBinding %q: %w", id, err)
 			}
-			fmt.Fprintf(options.out, "%s/%s updated\n", regexBindingResource, args[0])
+			fmt.Fprintf(options.out, "%s/%s updated\n", regexBindingResource, id)
 			return nil
 		},
 	}
 	remove := &cobra.Command{
-		Use: "delete ID", Short: "Delete a rule by its ID", Args: cobra.ExactArgs(1),
+		Use: "delete ID_OR_RESOURCE_NAME", Short: "Delete a rule by its ID", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cli, err := options.getClient()
 			if err != nil {
 				return err
 			}
+			id := strings.TrimPrefix(args[0], regexBindingResource+"/")
 			rule := regexBindingObject()
-			if err := cli.Get(cmd.Context(), client.ObjectKey{Name: args[0]}, rule); err != nil {
-				return fmt.Errorf("get ResourcePoolRegexBinding %q: %w", args[0], err)
+			if err := cli.Get(cmd.Context(), client.ObjectKey{Name: id}, rule); err != nil {
+				return fmt.Errorf("get ResourcePoolRegexBinding %q: %w", id, err)
 			}
 			if err := deleteRegexBinding(cmd.Context(), cli, rule); err != nil {
 				return err
 			}
-			fmt.Fprintf(options.out, "%s/%s deleted\n", regexBindingResource, args[0])
+			fmt.Fprintf(options.out, "%s/%s deleted\n", regexBindingResource, id)
 			return nil
 		},
 	}

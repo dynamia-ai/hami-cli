@@ -61,7 +61,8 @@ func TestPoolRegexBindingLifecycle(t *testing.T) {
 	if err := cli.Update(ctx, rule); err != nil {
 		t.Fatal(err)
 	}
-	mustRun("regex-bindings", "update", id, "team-.*")
+	qualified := strings.TrimSpace(mustRun("regex-bindings", "list", "--pool", "pool-a", "-o", "name"))
+	mustRun("regex-bindings", "update", qualified, "team-.*")
 	if got := mustRun("regex-bindings", "list", "--pool", "pool-a", "-o", "name"); strings.TrimSpace(got) != regexBindingResource+"/"+id {
 		t.Fatalf("unexpected filtered list: %s", got)
 	}
@@ -81,7 +82,7 @@ func TestPoolRegexBindingLifecycle(t *testing.T) {
 	if err := cli.Update(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	mustRun("regex-bindings", "delete", other.GetName())
+	mustRun("regex-bindings", "delete", strings.TrimSpace(mustRun("regex-bindings", "list", "--pool", "pool-b", "-o", "name")))
 	if err := cli.Get(ctx, client.ObjectKey{Name: other.GetName()}, regexBindingObject()); !apierrors.IsNotFound(err) {
 		t.Fatalf("get explicitly deleted rule: %v", err)
 	}
