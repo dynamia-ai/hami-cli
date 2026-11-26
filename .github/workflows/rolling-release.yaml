@@ -304,6 +304,7 @@ jobs:
 
       - name: Validate trusted tooling and binary payload
         env:
+          VERSION: ${{ needs.build.outputs.version }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
@@ -364,6 +365,7 @@ jobs:
 
       - name: Validate trusted tooling and binary payload
         env:
+          VERSION: ${{ needs.build.outputs.version }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           test "$(git -C release-control rev-parse HEAD)" = "$WORKFLOW_SHA"
