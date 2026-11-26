@@ -1,49 +1,27 @@
 ---
 name: managing-hami-resource-pools
-description: Use when inspecting or changing HAMi Enterprise ResourcePool, GPUDevice, or ResourcePoolBinding objects with hami-cli, including namespace access, NVIDIA or Ascend device pool ownership, cleanup, or live-cluster validation.
+description: Use hami-cli to inspect or change HAMi Enterprise resource pools, quotas, scheduling defaults, NVIDIA or Ascend device assignments, explicit namespace bindings, and regex namespace grants. Covers RE2 preview, declarative apply, teardown, and live-cluster validation.
 ---
 
-# Managing HAMi Resource Pools
+# Managing HAMi resource pools
 
-## Outcome
+Use `hami-cli version` and the relevant subcommand's `--help` to identify the available commands. Pass an explicit `--context` and a bounded `--request-timeout` on cluster calls. The CLI operates on existing Kubernetes infrastructure. Namespace provisioning, CRD or manager installation, and Pod-level validation require separate tooling and authorization. Use `kubectl` only within the user's authorization.
 
-Use `hami-cli` as the Kubernetes client for resource-pool operations. Select the target context explicitly, read existing state before mutation, preserve objects owned by other actors, and make claims only from post-operation evidence.
+| Task | Commands and procedure |
+| --- | --- |
+| Audit pools, bindings, or devices | [Capture a baseline](references/operations.md#set-target-context-and-capture-a-baseline) with the relevant list commands. `pool describe NAME` summarizes associations. |
+| Create a pool or change quotas and scheduling defaults | [Use pool create, update, and describe](references/operations.md#manage-pools-quotas-and-scheduling-policies). Check the generation before using the quota ledger. |
+| Assign or restore a device | [Inspect device inventory and ownership](references/operations.md#manage-pool-and-device-ownership). Use the object name or the exact node, device type, and device ID. |
+| Grant or revoke access for one namespace | [Manage explicit bindings](references/operations.md#manage-explicit-namespace-bindings) with `pool bind` and `unbind`. Check overlapping regex grants when reporting effective access. |
+| Preview or change a namespace regex | [Use pool regex-bindings](references/operations.md#manage-regex-namespace-bindings). Preview reads existing Namespace names. Creating or updating a rule grants access to matching existing and future namespaces. |
+| Apply caller-owned desired state | [Apply manifests](references/operations.md#apply-declarative-manifests) for ResourcePool, ResourcePoolBinding, or an existing GPUDevice. Use dedicated commands for regex rules. |
+| Clean up a test or remove a pool and its references | [Choose the deletion procedure](references/operations.md#delete-pools-and-clean-up-references). Reserve `pool delete --force` for an authorized teardown of all matching references. |
+| Run the CLI or install the bundled skill from an image | [Run from a container image](references/operations.md#run-from-a-container-image). |
 
-## Scope
+## Before and after a write
 
-Use this skill for audits, namespace access, pool lifecycle, GPU ownership, cleanup, and live validation without falling back to `kubectl`.
-
-`hami-cli` does not create namespaces, install CRDs/controllers, or prove workload-level GPU behavior. If the requested outcome needs an unsupported operation, report that boundary instead of silently substituting another client. Use `kubectl` only when the user separately authorizes it.
-
-## Operating pattern
-
-1. Run `hami-cli version` and relevant `--help` output. Use the selected `--context` and a bounded `--request-timeout` on every cluster call.
-2. Use `pool describe NAME` for a human-readable view of one pool, its CPU and memory quota ledger, and its associated namespaces and devices. Capture `pool list -o json`, `device list -o json`, and `pool bindings -A -o json` before mutation. Structured output is the evidence source; tables are for humans.
-3. Choose the ownership mode:
-   - Audit: read only.
-   - User-owned desired state: use `apply` so an identical manifest is rerunnable.
-   - Temporary test relation: require absence, use `pool bind`, record its UID, exclude concurrent writers, and re-check the UID immediately before `pool unbind`.
-   - GPU move: proceed only with explicit authorization and current device/allocation evidence. For temporary cleanup, record the device UID and use `device unassign` with both `--expected-uid` and `--expected-pool`.
-4. Mutate the smallest object set. Prefer `pool bind`/`pool unbind`, `device assign`/`device unassign`, and `pool create`/`pool update`/`pool delete` over hand-edited manifests. Use `pool delete --force` only for an intentional pool teardown that should also remove every binding and device assignment referencing that pool.
-5. Verify controller-observed state. For temporary changes, clean up in reverse reference order and compare final maps with the baseline; for persistent changes, prove the intended delta and unchanged unrelated state.
-
-Read [references/operations.md](references/operations.md) before executing mutations or diagnosing failures.
-
-## Safety invariants
-
-- Never assume a namespace exists or is disposable; `hami-cli` cannot establish that fact.
-- `pool bindings` requires either one pool name or `-A`/`--all-pools`; do not combine them.
-- `pool bindings` always spans namespaces and rejects an explicit `--namespace`; filter its structured output when only one namespace is relevant.
-- For physical-identity assignment or unassignment, use the exact node, device type, and device ID from structured inventory. `--device-type` defaults to `NVIDIA`; Ascend requires its exact scheduler `commonWord`. See the operations reference for server prerequisites and allocation semantics.
-- Supported output formats are `table`, `name`, `json`, and `yaml`; there is no `wide` output.
-- Repeating `pool bind` returns `AlreadyExists`. Use `apply` only when the caller owns the desired object; do not adopt an unrelated binding.
-- `pool unbind` and non-force `pool delete --wait=false` are name-based deletes without UID preconditions. `pool delete --force` reads the target first and uses UID preconditions for the pool and each binding plus optimistic patches for devices, but it is still a destructive teardown rather than temporary-cleanup ownership proof.
-- `pool unbind` affects future Pod authorization. It does not evict existing Pods or reclaim their GPUs.
-- `pool delete --force` deletes matching explicit and regex namespace bindings and clears matching GPU assignments, but it does not evict existing Pods. It re-lists all reference types after each cleanup pass, accepts a listed reference disappearing concurrently, and accepts the pool disappearing only after an empty reference snapshot. It fails if references remain after five passes. Other cleanup failures stop pool deletion; earlier successful cleanup is not rolled back, so re-read all references before retrying.
-- An empty allocation list does not exclude concurrent scheduling. Coordinate a scheduling freeze or obtain owner confirmation before moving a live GPU.
-- `device unassign` without ownership flags clears the assignment observed by its internal read. Temporary cleanup must pass both `--expected-uid` and `--expected-pool` so an earlier replacement or reassignment fails closed; a later change conflicts with the command's optimistic patch.
-- `pool delete` waits for the original pool UID to disappear. Use `--wait=false` to return after submitting deletion, then check for absence; never strip the finalizer to make a test pass.
-- `pool create` and `pool update` write only `spec.quota`; the manager owns `status.quota`. CPU and memory values are Kubernetes quantities, zero is a hard zero ceiling, and the literal `unlimited` removes only the selected dimension. Quota accounting uses Pod limits; every controlled dimension requires a positive limit, while requests are optional and independent. Updates use an optimistic lock, so a conflict requires a fresh read rather than an overwrite. Use `pool update --wait-for-current` with a bounded `--wait-timeout` when the workflow depends on manager reconciliation; otherwise treat used and reserved values as current only when `pool describe` reports a current quota ledger.
-- `pool create` is rejected while a non-terminal Pod still refers to an earlier pool with the same name. Use a new name or wait for those Pods to terminate; do not delete their manager-owned membership metadata.
-- Enabling quota can be rejected while Pod admissions are in flight. Re-read the pool and retry only after those admissions settle; do not bypass the transition barrier.
-- On conflicts, forbidden responses, unknown resource types, timeouts, or ambiguous writes, re-read state and fail closed. Do not bypass RBAC or TLS validation.
+- Read the affected objects as JSON. For a full lifecycle, save the pool, explicit binding, regex rule (when served), and device maps for comparison. A preview-only task needs just the namespace read. Keep an audit read-only.
+- For a persistent change, verify the requested delta and leave it in place. When checking namespace access, inspect both explicit bindings and matching regex rules for the pool. Unbinding a namespace does not evict running Pods.
+- For a temporary object, establish absence and protect its identity from creation through UID capture. Record the UID after a successful create. An existing object, duplicate rule, or ambiguous create result gives no ownership evidence. Before cleanup, verify that the object still belongs to the test and exclude replacement between that check and the CLI's own delete. `pool unbind` deletes by name. Neither pool nor rule deletion accepts a caller-supplied UID.
+- Before an authorized device move, check allocations and workloads with the owner or coordinate a scheduling freeze. For a temporary test, use an originally unassigned spare device. Record its UID before assignment and pass both `--expected-uid` and `--expected-pool` when unassigning it.
+- [Verify convergence](references/operations.md#verify-bounded-convergence) before claiming success. Separate a stored spec, current controller status, and observed workload behavior. On a conflict, denial, or ambiguous result, re-read what the identity can access. Report missing evidence and perform only cleanup whose ownership you can establish.
