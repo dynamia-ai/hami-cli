@@ -24,6 +24,7 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Keep the distribution matrix in sync with hack/verify-release-archives.sh.
     ignore:
       - goos: windows
         goarch: arm64
@@ -55,7 +56,4 @@ release:
   disable: true
 
 changelog:
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
+  disable: true # The GitHub publication job generates release notes.

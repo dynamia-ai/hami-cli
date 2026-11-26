@@ -6,11 +6,14 @@
 
 | 通道 | 触发方式 | 版本目录和镜像标签 | 可变性 |
 | --- | --- | --- | --- |
-| 稳定版 | 推送 `vX.Y.Z` 标签 | `vX.Y.Z` | 同一版本可在 OSS、S3、GitHub Release 和 GHCR 中覆盖 |
+| 稳定版 | 推送 `vX.Y.Z` 标签 | `vX.Y.Z` | 同一版本可在 GitHub Release、OSS、S3 和 GHCR 中更新 |
+| 预发布版 | 推送 `vX.Y.Z-rc.1` 等预发布标签 | 标签原名 | 同一版本可在 GitHub Release、OSS、S3 和 GHCR 中更新 |
 | latest | `main` 更新 | `latest` | 后续发布会覆盖 |
 | 分支版 | 从 `main` 手动运行 Rolling Release | `branch-<slug>` | 同名分支版本会覆盖 |
 
-稳定版标签必须符合语义化版本格式，且标签提交必须已经进入 `main`。分支版输入必须是仓库中已有的远端分支。工作流会将分支名转换为小写安全字符；原名称包含 `/`、大写字符、其他不安全字符或长度超过限制时，版本末尾会附加短哈希。
+版本标签必须符合 SemVer，且标签提交必须已经进入 `main`。为使标签可直接用作镜像标签和安装版本，标签最长为 128 个字符，预发布标识符使用小写字母、数字和连字符，省略 `+build` 元数据。全数字标识符遵循 SemVer 的前导零限制。
+
+分支版输入必须是仓库中已有的远端分支。工作流将分支名转换为小写安全字符。原名称包含 `/`、大写字符或其他不安全字符，或者超过长度限制时，工作流会在版本末尾附加短哈希。
 
 `latest` 和手动滚动发布使用不同的固定并发组。所有手动滚动发布会跨分支串行执行，避免将未经截断的分支名写入 GitHub Actions 并发组，也避免不同运行的多渠道分发相互穿插。
 
@@ -22,51 +25,44 @@ gh workflow run rolling-release.yaml --ref main -f branch=feature/my-change
 
 ## 发布制品
 
-GoReleaser 生成五个平台归档，以及与每个归档同名的 `.sha256` 校验文件：
+GoReleaser 为每个受支持的平台生成 `hami-cli_<version>_<os>_<arch>.tar.gz` 和同名的 `.sha256` 文件。每个归档只包含对应的可执行文件，Windows 的文件名为 `hami-cli.exe`。工作流在上传前校验平台、版本、归档内容和 SHA-256。
 
-- `linux/amd64`
-- `linux/arm64`
-- `darwin/amd64`
-- `darwin/arm64`
-- `windows/amd64`
+| 系统 | 架构 |
+| --- | --- |
+| Linux | `amd64`、`arm64` |
+| macOS | `amd64`、`arm64` |
+| Windows | `amd64` |
 
-每个平台归档只包含对应平台的 `hami-cli` 可执行文件。发布流程在上传前检查归档内容。如果归档包含其他文件，发布流程停止。
+稳定版和预发布版均通过公开的 [GitHub Releases](https://github.com/dynamia-ai/hami-cli/releases) 提供五个归档、五个 `.sha256` 文件、汇总校验文件 `checksums.txt` 和 `image-digest.txt`。下载全部归档后，可以在同一目录运行 `sha256sum -c checksums.txt` 批量校验。
 
-稳定版还发布 `image-digest.txt`。所有通道都会构建并发布 `linux/amd64`、`linux/arm64` 多架构 GHCR 镜像。
+GitHub 为新 Release 草稿生成发布说明。工作流校验每个 GitHub 资产的 SHA-256 后公开草稿。GitHub 根据版本和 Release 创建时间选择标记为 **Latest** 的稳定版，预发布版显示为 **Pre-release**。滚动通道的 `latest` 是对象存储目录和 GHCR 镜像标签。
 
-发布任务会将二进制制品写入两个公开下载后端：
-
-- 阿里云 OSS
-- S3 兼容对象存储
-
-稳定版会额外创建 GitHub Release 副本。访问该副本需要登录 GitHub，并具有私有仓库的读取权限。
+OSS 和 S3 同样发布平台归档和逐文件校验值。标签发布还向两个后端提供 `image-digest.txt`。所有通道均构建并发布支持 `linux/amd64` 和 `linux/arm64` 的 GHCR 镜像。
 
 `main` 的 `latest` 发布还会基于仓库根目录的 `install.sh` 生成两份后端专用脚本，并分别写入两个公开下载前缀的 `install.sh`。OSS 脚本默认从 OSS 下载，R2 脚本默认从 R2 下载；主后端失败或校验不通过时，两者会互相回退。安装脚本本身是可变入口，默认安装 `latest`，并在运行时下载对应平台归档和 `.sha256` 校验文件，再调用二进制内置的 Skill 安装器。手动触发的分支版不会覆盖公共安装脚本。
 
 两个发布工作流均设置 `DOCKER_BUILD_RECORD_UPLOAD: "false"`。`docker/build-push-action` 继续生成 Docker build summary，但不上传 `.dockerbuild` Actions artifact。
 
-两个发布工作流都只构建一次，再通过临时 Actions artifacts 将制品传给各分发 job：`release-binaries-<version>` 包含平台归档、校验文件以及稳定版的 `image-digest.txt`，`release-image-<version>` 包含 OCI 镜像归档。二进制 artifact 只由 OSS、S3、GitHub Release 和 Summary 的相关 job 下载，镜像 artifact 只由 GHCR job 下载，避免各渠道重复构建或传递不需要的大文件。
+两个发布工作流都只构建一次，再通过临时 Actions artifacts 将制品传给各分发 job：`release-binaries-<version>` 包含平台归档、校验文件以及标签发布的 `image-digest.txt`，`release-image-<version>` 包含 OCI 镜像归档。二进制 artifact 只由 OSS、S3、GitHub Release 和 Summary 的相关 job 下载，镜像 artifact 只由 GHCR job 下载，避免各渠道重复构建或传递不需要的大文件。
 
-分发前置 job 会先集中检查所有渠道的凭据和公开下载地址，配置不完整时不会启动任一发布操作。OSS、S3、GHCR 分发随后并行执行，稳定版还会并行创建 GitHub Release 副本。只有所有渠道均发布并校验成功后，Summary job 才会写入成功摘要。Cleanup job 使用 `always()` 等待所有 artifact 消费者结束，因此任一分发 job 失败时仍会删除两个临时 artifacts。两者的保留期仍设置为 1 天，仅作为 workflow 被外部取消或 GitHub artifact 删除 API 不可用时的兜底；Actions artifact 不是公开分发端点。
+标签发布在构建后并行分发到 GitHub、OSS、S3 和 GHCR。每个对象存储 job 单独校验本渠道的凭据和公开地址。GitHub Release 依赖构建得到的镜像 digest，GHCR 的上传和验证由独立 job 执行。滚动发布在分发前集中校验对象存储配置、二进制载荷和公共安装脚本。
 
-发布成功后，workflow run summary 会列出：
+所有渠道发布并校验成功后，workflow run summary 列出以下链接和引用。Cleanup job 随后删除临时载荷。分发失败时，可以在 1 天的 Actions artifact 保留期内重跑失败的 job。临时载荷过期后，重跑整个 workflow。
 
-- 每个公开文件的 OSS 和 S3 下载链接；
-- `latest` 发布的一键安装脚本 OSS 和 S3 链接；
+- GitHub Release 和汇总校验文件，仅标签发布提供。
+- 每个对象存储文件的 OSS 和 S3 下载链接。
+- `latest` 的一键安装脚本链接。
 - GHCR 标签引用、不可变 digest 引用和 digest。
 
-## 稳定版覆盖合同
+## 重试发布
 
-稳定版允许更新同一版本路径、GitHub Release 资产和 GHCR 标签。发布者应在推送标签前确认版本号和目标提交，尽量避免复用已发布版本。发布工作流不会阻止覆盖已有版本。
+推送版本标签前，确认版本号和目标提交。发布遇到后端故障时，修复后重跑原有标签的发布任务。GitHub 会沿用已有发布说明，并重用匹配的资产。草稿中的缺失或不匹配资产会在公开前补齐。
 
-- OSS 和 S3 允许覆盖同一版本路径下的同名对象。对象使用 `no-cache` 缓存策略，客户端需要重新验证对象内容。
-- OSS Bucket 开启版本控制时，OSS 保留历史版本；不带 `versionId` 的公开下载链接指向当前版本。
-- GitHub Release 使用 `--clobber` 更新同名资产。该操作会先删除旧资产再上传新资产，不是原子替换；上传失败时，发布工作流停止并保留失败状态。
-- GHCR 版本标签会更新到本次构建的镜像。发布后仍会验证标签对应的 digest、版本和源码 revision；使用者需要不可变引用时，应使用 `image@sha256:...`。
+OSS 和 S3 允许覆盖同一版本路径下的同名对象，使用要求客户端重新验证的 `no-cache` 缓存策略。OSS Bucket 开启版本控制时保留历史版本，公开下载链接默认指向当前对象。
 
-滚动版的 `latest` 和分支版本在 OSS、S3 和 GHCR 中同样允许更新。
+GitHub Release 允许通过 `--clobber` 更新已发布的同名资产。该操作先删除旧资产，再上传新资产。开启 GitHub 不可变发布时，已发布资产受 GitHub 保护。GHCR 允许更新版本标签，使用者可通过 `image@sha256:...` 固定镜像。
 
-各发布后端的更新不构成原子事务。如果部分后端更新后任务失败，各通道可能暂时提供不同内容。排除故障后，重新运行同一标签的发布任务，使各后端收敛到本次构建内容。发布任务仅在全部上传和公开回读校验完成后写入成功 Summary。
+各分发渠道独立更新。某个渠道失败时，其他渠道可能已经提供新内容。重新运行失败任务后，查看公开回读结果和 workflow run summary，确认各渠道均已完成更新。
 
 ## 公开可用性验证
 
@@ -127,8 +123,9 @@ make ci
 actionlint .github/workflows/*.yaml
 ```
 
-涉及 GoReleaser 配置时，再运行：
+涉及 GoReleaser 配置时，检查配置并构建本地 snapshot。
 
 ```bash
 make release-check
+make package-release VERSION=branch-release-check
 ```

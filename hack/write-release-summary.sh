@@ -6,6 +6,7 @@ version="${1:?usage: write-release-summary.sh VERSION DIST_DIR IMAGE DIGEST}"
 dist_dir="${2:?usage: write-release-summary.sh VERSION DIST_DIR IMAGE DIGEST}"
 image="${3:?usage: write-release-summary.sh VERSION DIST_DIR IMAGE DIGEST}"
 digest="${4:?usage: write-release-summary.sh VERSION DIST_DIR IMAGE DIGEST}"
+github_release_url="${5:-}"
 
 : "${ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL:?ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL is required}"
 : "${S3_PUBLIC_DOWNLOAD_BASE_URL:?S3_PUBLIC_DOWNLOAD_BASE_URL is required}"
@@ -44,6 +45,10 @@ done
   echo
   echo "Version: \`$version\`"
   echo
+  if [[ -n "$github_release_url" ]]; then
+    echo "[GitHub Release]($github_release_url) · [SHA-256 checksums](${github_release_url%/tag/*}/download/$version/checksums.txt)"
+    echo
+  fi
   echo '| Artifact | Public downloads |'
   echo '| --- | --- |'
   for artifact in "${artifacts[@]}"; do

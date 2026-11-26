@@ -26,7 +26,7 @@ env:
 
 jobs:
   build:
-    name: Build stable release
+    name: Build tagged release
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -42,13 +42,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate stable tag
+      - name: Validate release tag
         id: release
         shell: bash
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF_TYPE" = tag ]]
-          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          bash hack/classify-release-tag.sh "$GITHUB_REF_NAME"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git show-ref --verify --quiet refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
@@ -91,7 +91,7 @@ jobs:
           GIT_CONFIG_VALUE_0: https://github.com/
 
       - name: Verify release archive contents
-        run: bash hack/verify-release-archives.sh dist
+        run: bash hack/verify-release-archives.sh dist "$GITHUB_REF_NAME"
 
       - name: Prepare image context from release binaries
         run: bash hack/prepare-release-image-context.sh dist "$RUNNER_TEMP/release-image"
@@ -133,7 +133,7 @@ jobs:
           printf '%s\n' "$digest" > dist/image-digest.txt
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Upload stable binary payload
+      - name: Upload tagged binary payload
         id: binary-artifact
         uses: actions/upload-artifact@v7
         with:
@@ -145,8 +145,9 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
-      - name: Upload stable image payload
+      - name: Upload tagged image payload
         id: image-artifact
         uses: actions/upload-artifact@v7
         with:
@@ -155,43 +156,11 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
-
-  validate_distribution:
-    name: Validate stable distribution configuration
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Validate publication credentials and endpoints
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
-          ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
-          ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
-          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
-          S3_REGION: ${{ secrets.S3_REGION }}
-        run: |
-          test -n "$ALIYUN_OSS_ACCESS_KEY_ID"
-          test -n "$ALIYUN_OSS_ACCESS_KEY_SECRET"
-          test -n "$ALIYUN_OSS_BUCKET"
-          test -n "$ALIYUN_OSS_ENDPOINT"
-          test -n "$ALIYUN_OSS_REGION"
-          test -n "$S3_ACCESS_KEY_ID"
-          test -n "$S3_SECRET_ACCESS_KEY"
-          test -n "$S3_BUCKET"
-          test -n "$S3_ENDPOINT"
-          test -n "$S3_REGION"
-          test -n "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
-          test -n "$S3_PUBLIC_DOWNLOAD_BASE_URL"
+          overwrite: true
 
   publish_oss:
-    name: Publish stable binaries to OSS
-    needs: [build, validate_distribution]
+    name: Publish tagged binaries to OSS
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -204,16 +173,14 @@ jobs:
           path: release-control
           persist-credentials: false
 
-      - name: Download stable binary payload
+      - name: Download tagged binary payload
         uses: actions/download-artifact@v8.0.1
         with:
           name: release-binaries-${{ github.ref_name }}
           path: dist
 
-      - name: Validate release tooling and binary payload
-        run: |
-          test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
-          bash release-control/hack/verify-release-archives.sh dist
+      - name: Validate release tooling
+        run: test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Install ossutil
         shell: bash
@@ -228,14 +195,16 @@ jobs:
             "$workdir/ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
           ossutil version
 
-      - name: Publish stable artifacts to OSS
+      - name: Publish tagged artifacts to OSS
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
           ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
           ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
           ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
-        run: bash release-control/hack/publish-oss.sh stable "$GITHUB_REF_NAME" dist
+        run: |
+          [[ "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" =~ ^https://[^[:space:]]+$ ]]
+          bash release-control/hack/publish-oss.sh tagged "$GITHUB_REF_NAME" dist
 
       - name: Verify public artifacts from OSS
         shell: bash
@@ -244,8 +213,8 @@ jobs:
           "aliyun-oss=$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL"
 
   publish_s3:
-    name: Publish stable binaries to S3
-    needs: [build, validate_distribution]
+    name: Publish tagged binaries to S3
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -258,28 +227,28 @@ jobs:
           path: release-control
           persist-credentials: false
 
-      - name: Download stable binary payload
+      - name: Download tagged binary payload
         uses: actions/download-artifact@v8.0.1
         with:
           name: release-binaries-${{ github.ref_name }}
           path: dist
 
-      - name: Validate release tooling and binary payload
-        run: |
-          test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
-          bash release-control/hack/verify-release-archives.sh dist
+      - name: Validate release tooling
+        run: test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Verify AWS CLI
         run: aws --version
 
-      - name: Publish stable artifacts to S3
+      - name: Publish tagged artifacts to S3
         env:
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           S3_REGION: ${{ secrets.S3_REGION }}
-        run: bash release-control/hack/publish-s3.sh stable "$GITHUB_REF_NAME" dist
+        run: |
+          [[ "$S3_PUBLIC_DOWNLOAD_BASE_URL" =~ ^https://[^[:space:]]+$ ]]
+          bash release-control/hack/publish-s3.sh tagged "$GITHUB_REF_NAME" dist
 
       - name: Verify public artifacts from S3
         shell: bash
@@ -288,15 +257,15 @@ jobs:
           "s3=$S3_PUBLIC_DOWNLOAD_BASE_URL"
 
   publish_ghcr:
-    name: Publish stable image to GHCR
-    needs: [build, validate_distribution]
+    name: Publish tagged image to GHCR
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Download stable image payload
+      - name: Download tagged image payload
         uses: actions/download-artifact@v8.0.1
         with:
           name: release-image-${{ github.ref_name }}
@@ -353,12 +322,14 @@ jobs:
           done
 
   publish_github:
-    name: Publish stable GitHub Release
-    needs: [build, validate_distribution]
+    name: Publish GitHub Release
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
+    outputs:
+      url: ${{ steps.release.outputs.url }}
     steps:
       - name: Checkout release tooling
         uses: actions/checkout@v7
@@ -367,26 +338,26 @@ jobs:
           path: release-control
           persist-credentials: false
 
-      - name: Download stable binary payload
+      - name: Download tagged binary payload
         uses: actions/download-artifact@v8.0.1
         with:
           name: release-binaries-${{ github.ref_name }}
           path: dist
 
-      - name: Validate release tooling and binary payload
-        run: |
-          test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
-          bash release-control/hack/verify-release-archives.sh dist
+      - name: Validate release tooling
+        run: test "$(git -C release-control rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Create authenticated GitHub Release mirror
+      - name: Publish and verify release assets
+        id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
+          EXPECTED_DIGEST: ${{ needs.build.outputs.image-digest }}
+        run: |
+          test "$(cat dist/image-digest.txt)" = "$EXPECTED_DIGEST"
           bash release-control/hack/publish-github-release.sh "$GITHUB_REF_NAME" dist
-          "$ALIYUN_OSS_PUBLIC_DOWNLOAD_BASE_URL" "$S3_PUBLIC_DOWNLOAD_BASE_URL" "$IMAGE"
 
   summarize:
-    name: Summarize stable release
+    name: Summarize tagged release
     needs: [build, publish_oss, publish_s3, publish_ghcr, publish_github]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -400,7 +371,7 @@ jobs:
           path: release-control
           persist-credentials: false
 
-      - name: Download stable binary payload
+      - name: Download tagged binary payload
         uses: actions/download-artifact@v8.0.1
         with:
           name: release-binaries-${{ github.ref_name }}
@@ -409,16 +380,14 @@ jobs:
       - name: Write published artifact summary
         env:
           IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
+          RELEASE_URL: ${{ needs.publish_github.outputs.url }}
         run: >-
           bash release-control/hack/write-release-summary.sh
-          "$GITHUB_REF_NAME" dist "$IMAGE" "$IMAGE_DIGEST"
+          "$GITHUB_REF_NAME" dist "$IMAGE" "$IMAGE_DIGEST" "$RELEASE_URL"
 
   cleanup:
-    name: Delete stable release payloads
-    if: >-
-      ${{ always() &&
-          (needs.build.outputs.binary-artifact-id != '' ||
-           needs.build.outputs.image-artifact-id != '') }}
+    name: Delete tagged release payloads
+    if: needs.summarize.result == 'success'
     needs: [build, publish_oss, publish_s3, publish_ghcr, publish_github, summarize]
     runs-on: ubuntu-latest
     timeout-minutes: 5
