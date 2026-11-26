@@ -1292,7 +1292,7 @@ func TestPoolDescribeShowsOnlyAssociatedNamespacesAndDevices(t *testing.T) {
 		"Healthy devices:        1\n" +
 		"Revision:               inventory-7\n" +
 		"\n" +
-		"Namespaces:\n" +
+		"Explicit namespace bindings:\n" +
 		"  NAMESPACE  BINDING     BOUND\n" +
 		"  team-a     training-a  True\n" +
 		"  team-b     training-a  False\n" +
@@ -1329,7 +1329,7 @@ func TestPoolDescribeShowsEmptyAssociations(t *testing.T) {
 	if strings.Contains(output.String(), "Quota ledger:") {
 		t.Fatalf("pool describe unconfigured quota output = %q, want no quota ledger state", output.String())
 	}
-	if got, want := output.String(), "Namespaces:\n  <none>\n\nDevices:\n  <none>\n"; !strings.Contains(got, want) {
+	if got, want := output.String(), "Explicit namespace bindings:\n  <none>\n\nDevices:\n  <none>\n"; !strings.Contains(got, want) {
 		t.Fatalf("pool describe empty associations = %q, want suffix %q", got, want)
 	}
 
@@ -1499,6 +1499,7 @@ func TestPoolDeleteForceRemovesOnlyTargetPoolReferences(t *testing.T) {
 		"resourcepoolbinding.resource.hami.io/share-gpu deleted from namespace team-a\n" +
 		"gpudevice.resource.hami.io/device-a unassigned\n" +
 		"gpudevice.resource.hami.io/device-b unassigned\n" +
+		"resourcepool.resource.hami.io/share-gpu deletion requested\n" +
 		"resourcepool.resource.hami.io/share-gpu deleted\n"
 	if output.String() != wantOutput {
 		t.Errorf("forced pool delete output = %q, want %q", output.String(), wantOutput)
@@ -1792,7 +1793,7 @@ func TestPoolDeleteWithoutForceDoesNotRemoveReferences(t *testing.T) {
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu"}}
+	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "share-gpu", UID: "pool-uid"}}
 	binding := &resourcepoolv1alpha1.ResourcePoolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: pool.Name, Namespace: "cert-manager"},
 		Spec:       resourcepoolv1alpha1.ResourcePoolBindingSpec{PoolRef: resourcepoolv1alpha1.PoolReference{Name: pool.Name}},
@@ -1821,6 +1822,53 @@ func TestPoolDeleteWithoutForceDoesNotRemoveReferences(t *testing.T) {
 	}
 	if got := gpuDevicePoolName(storedDevice); got != pool.Name {
 		t.Errorf("device pool = %q after plain delete, want %q", got, pool.Name)
+	}
+}
+
+func TestPoolDeleteWaitsForOriginalUID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+	}{
+		{name: "original retained by finalizer"},
+		{name: "same name recreated", replace: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "training", UID: "original"}}
+			if !tc.replace {
+				pool.Finalizers = []string{"resource.hami.io/reference-protection"}
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).WithInterceptorFuncs(interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if err := c.Delete(ctx, obj, opts...); err != nil {
+						return err
+					}
+					if tc.replace {
+						return c.Create(ctx, &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: pool.Name, UID: "replacement"}})
+					}
+					return nil
+				},
+			}).Build()
+			var out bytes.Buffer
+			cmd := newRootCommand(&commandOptions{client: cli, out: &out, errOut: &out})
+			cmd.SetArgs([]string{"pool", "delete", pool.Name, "--wait-timeout=100ms"})
+			err := cmd.ExecuteContext(t.Context())
+			if !strings.Contains(out.String(), pool.Name+" deletion requested") {
+				t.Fatalf("missing request acknowledgement: %q", out.String())
+			}
+			completed := strings.Contains(out.String(), pool.Name+" deleted\n")
+			if tc.replace {
+				if err != nil || !completed {
+					t.Fatalf("original removed: err = %v, output = %q", err, out.String())
+				}
+			} else if !errors.Is(err, context.DeadlineExceeded) || completed {
+				t.Fatalf("original still present: err = %v, output = %q", err, out.String())
+			}
+		})
 	}
 }
 
@@ -2027,11 +2075,14 @@ func TestPoolDeleteForceClearsReferencesFromTerminatingPool(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, binding, device).Build()
 	output := &bytes.Buffer{}
 	command := newRootCommand(&commandOptions{client: cli, out: output, errOut: output})
-	command.SetArgs([]string{"pool", "delete", pool.Name, "--force"})
+	command.SetArgs([]string{"pool", "delete", pool.Name, "--force", "--wait=false"})
 	if err := command.Execute(); err != nil {
 		t.Fatalf("forced terminating pool delete error = %v, output = %q", err, output.String())
 	}
 
+	if !strings.Contains(output.String(), pool.Name+" deletion requested") || strings.Contains(output.String(), pool.Name+" deleted\n") {
+		t.Errorf("unexpected async delete output: %s", output)
+	}
 	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(binding), &resourcepoolv1alpha1.ResourcePoolBinding{}); !apierrors.IsNotFound(err) {
 		t.Errorf("get deleted binding error = %v, want NotFound", err)
 	}
