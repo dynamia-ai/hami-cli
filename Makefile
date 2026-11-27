@@ -54,7 +54,6 @@ verify: test vet
 	git diff --check
 
 define build_image
-	test -n "$${HAMI_ENTERPRISE_REPO_TOKEN}"
 	$(DOCKER) buildx build \
 		--file "$(DOCKERFILE)" \
 		--platform "$(1)" \
@@ -64,7 +63,6 @@ define build_image
 		--build-arg "VERSION=$(VERSION)" \
 		--build-arg "REVISION=$(IMAGE_REVISION)" \
 		--build-arg "BUILD_DATE=$(BUILD_DATE)" \
-		--secret id=github_token,env=HAMI_ENTERPRISE_REPO_TOKEN \
 		--load \
 		"$(IMAGE_CONTEXT)"
 endef

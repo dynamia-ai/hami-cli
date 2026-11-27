@@ -19,7 +19,6 @@ env:
   BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
   GOLANGCI_LINT_VERSION: v2.13.1
   GORELEASER_VERSION: v2.18.0
-  GOPRIVATE: github.com/dynamia-ai/*
 
 jobs:
   go:
@@ -39,11 +38,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - name: Require private module token
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
       - name: Checkout source
         uses: actions/checkout@v7
         with:
@@ -74,10 +68,6 @@ jobs:
           install-only: true
 
       - name: Run local CI contract
-        env:
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}@github.com/.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/
         run: make ci
 
   image:
@@ -102,11 +92,6 @@ jobs:
       IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
       IMAGE_REVISION: ${{ github.sha }}
     steps:
-      - name: Require private module token
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
-        run: test -n "$HAMI_ENTERPRISE_REPO_TOKEN"
-
       - name: Checkout source
         uses: actions/checkout@v7
         with:
@@ -127,8 +112,6 @@ jobs:
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Build and load without publishing
-        env:
-          HAMI_ENTERPRISE_REPO_TOKEN: ${{ secrets.HAMI_ENTERPRISE_REPO_TOKEN }}
         run: make build-image
 
       - name: Inspect image

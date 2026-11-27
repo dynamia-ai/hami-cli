@@ -85,7 +85,6 @@ GHCR 验证会检查清单 digest，以及 `linux/amd64`、`linux/arm64` 镜像�
 
 仓库需要以下 Actions secrets：
 
-- `HAMI_ENTERPRISE_REPO_TOKEN`：对 `github.com/dynamia-ai/hami-enterprise` 具有只读 `Contents` 权限，用于解析私有 Go 模块。
 - `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`：OSS 访问凭据。
 - `ALIYUN_OSS_BUCKET`、`ALIYUN_OSS_ENDPOINT`、`ALIYUN_OSS_REGION`：OSS Bucket、API 端点和区域。
 - `S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`：S3 兼容存储访问凭据。
@@ -108,9 +107,7 @@ OSS 发布身份需要读写对象和设置对象 ACL，S3 发布身份需要读
 
 ## 凭据边界
 
-Pull Request 和 `main` 的 CI 都需要读取私有资源池 API 模块。`hami-cli` 仓库的 write 权限不得授予无权读取 `hami-enterprise` 的用户，否则同仓库 PR 代码执行边界会扩大私有模块访问范围。
-
-调整任一仓库成员权限时，需要重新核对这一条件。如果两个仓库的写入和读取边界不再一致，应先停用 Pull Request 中使用私有模块 token 的 job，再改用具备审批保护的凭据边界。
+Pull Request 和 `main` 的 CI 使用仓库源码和公开 Go 模块构建。云存储访问凭据仅用于发布任务。
 
 GHCR package 的写权限只能授予本仓库发布 workflow。其他主体拥有写权限时，可以在 workflow 完成后将已验证的稳定标签指向其他镜像。稳定交付必须保留并使用 `image@sha256:...` 引用，不能只依赖标签。
 

@@ -22,6 +22,8 @@
 
 厂商运行时插件仍处于设计阶段。
 
+[`internal/resourcepool/v1alpha1`](../internal/resourcepool/v1alpha1) 定义 CLI 使用的 Kubernetes 对象。修改对象定义时，需保持 API 组和版本、JSON 字段以及设备命名和标签规则与已部署的资源池 CRD 一致。
+
 ## 目标命令模型
 
 厂商运行时能力计划收敛到统一入口：
@@ -71,8 +73,8 @@ cmd/root
 
 - 建立独立 Go 模块并原样迁入资源池命令和测试。
 - 在新仓库验证独立构建、安装和发布。
-- 从 `hami-enterprise` 删除旧 CLI 源码，保留独立发布的资源池 API。
+- 从 `hami-enterprise` 删除旧 CLI 源码，由 `hami-cli` 维护资源池客户端类型。
 - 根据真实 NVIDIA Docker PoC 固定共享运行合同和 NVIDIA 插件。
 - 在独立验证 Ascend 注入合同后接入 Ascend 插件。
 
-迁移完成前，不应在两个仓库同时修改 CLI 行为。进入删除阶段后，`hami-enterprise` 只维护资源池服务端和公开 API，CLI 行为由本仓库维护。
+迁移完成前，不应在两个仓库同时修改 CLI 行为。进入删除阶段后，`hami-enterprise` 维护资源池服务端和 CRD，`hami-cli` 维护客户端类型和命令行为。
