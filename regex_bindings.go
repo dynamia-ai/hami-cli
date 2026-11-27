@@ -21,6 +21,7 @@ import (
 
 const regexBindingKind = "ResourcePoolRegexBinding"
 const regexBindingResource = "resourcepoolregexbinding.resource.hami.io"
+const describeRegexMatchLimit = 20
 
 func regexBindingObject() *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
@@ -95,14 +96,19 @@ func listNamespaceNamesForPreview(ctx context.Context, cli client.Reader) ([]str
 	return names, nil
 }
 
-func matchingNamespaceNames(pattern *regexp.Regexp, names []string) []string {
+func matchingNamespaceNames(pattern *regexp.Regexp, names []string, limit int) ([]string, int) {
 	var matches []string
+	total := 0
 	for _, name := range names {
-		if pattern.MatchString(name) {
+		if !pattern.MatchString(name) {
+			continue
+		}
+		total++
+		if len(matches) < limit {
 			matches = append(matches, name)
 		}
 	}
-	return matches
+	return matches, total
 }
 
 func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
@@ -110,8 +116,8 @@ func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, 
 	if err != nil {
 		return err
 	}
-	matches := matchingNamespaceNames(pattern, names)
-	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, len(matches))
+	matches, total := matchingNamespaceNames(pattern, names, len(names))
+	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, total)
 	for _, name := range matches {
 		fmt.Fprintln(out, name)
 	}
@@ -126,11 +132,14 @@ func regexBindingMatchPreview(pattern string, namespaceNames []string) string {
 	if err != nil {
 		return "<invalid regex>"
 	}
-	matches := matchingNamespaceNames(compiled, namespaceNames)
-	if len(matches) == 0 {
-		return "<none>"
+	matches, total := matchingNamespaceNames(compiled, namespaceNames, describeRegexMatchLimit)
+	if total == 0 {
+		return "<none> (0 total)"
 	}
-	return strings.Join(matches, ", ")
+	if total > len(matches) {
+		matches = append(matches, "...")
+	}
+	return fmt.Sprintf("%s (%d total)", strings.Join(matches, ", "), total)
 }
 
 func createRegexBinding(ctx context.Context, cli client.Client, pool, pattern string) (*unstructured.Unstructured, error) {

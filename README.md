@@ -56,7 +56,7 @@ hami-cli pool regex-bindings delete RULE_ID
 
 创建时无需提供规则名；CLI 生成 ID，编辑时保持不变。`update` 和 `delete` 均接受裸 ID 或 `list -o name` 输出的完整资源名。`pool describe` 在 `Explicit namespace bindings` 下列出显式绑定，在 `Regex bindings` 下列出正则规则。同一个池中不能重复使用完全相同的表达式，不同池可各自创建相同的表达式。`pool delete --force` 也会清理指向目标池的正则规则。
 
-查看已有规则时，`pool describe` 的 `MATCHING NAMESPACES` 列按名称排序列出当前命中的命名空间。读取命名空间列表失败时，CLI 输出警告，并在该列显示 `<unavailable>`。
+查看已有规则时，`pool describe` 的 `MATCHING NAMESPACES` 列显示命中总数和按名称排序的前 20 个命名空间。超过 20 个时，名单以 `...` 结尾。读取命名空间列表失败时，CLI 输出警告，并在该列显示 `<unavailable>`。
 
 `pool delete` 在集群受理后显示 `deletion requested`，默认最多等待 2 分钟，确认原池已消失后显示 `deleted`。用 `--wait-timeout 5m` 调整等待上限，或用 `--wait=false` 在请求受理后返回。等待超时后，集群仍会继续处理删除请求。
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -153,9 +154,18 @@ func TestPoolDescribePreviewsRegexBindingMatches(t *testing.T) {
 	for _, name := range []string{"team-b", "prefix-team-a", "team-a", "team-b-suffix"} {
 		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
 	}
+	var opsNames []string
+	for i := 1; i <= 20; i++ {
+		name := fmt.Sprintf("ops-%02d", i)
+		opsNames = append(opsNames, name)
+		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	opsPreview := strings.Join(opsNames, ", ")
 	for _, rule := range []struct{ id, pool, pattern string }{
+		{"rule-all", "training", ".*"},
 		{"rule-matches", "training", "team-b|team-a"},
 		{"rule-empty", "training", "absent"},
+		{"rule-exact", "training", "ops-.*"},
 		{"rule-invalid", "training", "["},
 		{"rule-other-pool", "other", ".*"},
 	} {
@@ -172,12 +182,20 @@ func TestPoolDescribePreviewsRegexBindingMatches(t *testing.T) {
 		wantNamespaceLists    int
 	}{
 		{
-			name: "whole names and sorted matches", pool: "training", wantNamespaceLists: 1,
-			wantTable: header + `rule-empty "absent" <none> rule-invalid "[" <invalid regex> rule-matches "team-b|team-a" team-a, team-b`,
+			name: "sorted matches with a limit and total", pool: "training", wantNamespaceLists: 1,
+			wantTable: header + `rule-all ".*" ` + opsPreview + `, ... (24 total) ` +
+				`rule-empty "absent" <none> (0 total) ` +
+				`rule-exact "ops-.*" ` + opsPreview + ` (20 total) ` +
+				`rule-invalid "[" <invalid regex> ` +
+				`rule-matches "team-b|team-a" team-a, team-b (2 total)`,
 		},
 		{
 			name: "namespace list forbidden", pool: "training", wantNamespaceLists: 1, forbidden: true,
-			wantTable: header + `rule-empty "absent" <unavailable> rule-invalid "[" <unavailable> rule-matches "team-b|team-a" <unavailable>`,
+			wantTable: header + `rule-all ".*" <unavailable> ` +
+				`rule-empty "absent" <unavailable> ` +
+				`rule-exact "ops-.*" <unavailable> ` +
+				`rule-invalid "[" <unavailable> ` +
+				`rule-matches "team-b|team-a" <unavailable>`,
 		},
 		{name: "no rules for pool", pool: "empty"},
 	} {
