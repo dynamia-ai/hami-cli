@@ -246,6 +246,8 @@ hami-cli pool regex-bindings list --pool training
 hami-cli pool regex-bindings list
 ```
 
+运行 `hami-cli pool describe training`，可在 `Regex bindings` 表的 `MATCHING NAMESPACES` 列查看每条规则当前命中的命名空间。结果按名称排序，涵盖已通过其他绑定获准的命名空间。没有命中时显示 `<none>`。预览需要集群级 `list namespaces` 权限。读取列表失败时，CLI 向标准错误输出写入警告，预览列显示 `<unavailable>`，并继续输出资源池详情。
+
 如果后续命名规范收紧，改为只匹配视觉团队的训练命名空间（保留 `cv-train`、`cv-train-det` 和 `cv-train-seg`，不再包含 `nlp-train-sft`），可以按规则 ID 原地更新表达式。更新和删除都既支持裸 ID，也支持 `list -o name` 输出的完整资源名：
 
 ```bash

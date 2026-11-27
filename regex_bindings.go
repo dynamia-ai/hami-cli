@@ -82,24 +82,55 @@ func compileNamespaceRegex(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(`\A(?:` + parsed.String() + `)\z`)
 }
 
-func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
+func listNamespaceNamesForPreview(ctx context.Context, cli client.Reader) ([]string, error) {
 	var namespaces corev1.NamespaceList
 	if err := cli.List(ctx, &namespaces); err != nil {
-		return fmt.Errorf("list namespaces for preview: %w", err)
+		return nil, fmt.Errorf("list namespaces for preview: %w", err)
 	}
-	var matches []string
+	names := make([]string, 0, len(namespaces.Items))
 	for i := range namespaces.Items {
-		name := namespaces.Items[i].Name
+		names = append(names, namespaces.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func matchingNamespaceNames(pattern *regexp.Regexp, names []string) []string {
+	var matches []string
+	for _, name := range names {
 		if pattern.MatchString(name) {
 			matches = append(matches, name)
 		}
 	}
-	sort.Strings(matches)
+	return matches
+}
+
+func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
+	names, err := listNamespaceNamesForPreview(ctx, cli)
+	if err != nil {
+		return err
+	}
+	matches := matchingNamespaceNames(pattern, names)
 	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, len(matches))
 	for _, name := range matches {
 		fmt.Fprintln(out, name)
 	}
 	return nil
+}
+
+func regexBindingMatchPreview(pattern string, namespaceNames []string) string {
+	if namespaceNames == nil {
+		return "<unavailable>"
+	}
+	compiled, err := compileNamespaceRegex(pattern)
+	if err != nil {
+		return "<invalid regex>"
+	}
+	matches := matchingNamespaceNames(compiled, namespaceNames)
+	if len(matches) == 0 {
+		return "<none>"
+	}
+	return strings.Join(matches, ", ")
 }
 
 func createRegexBinding(ctx context.Context, cli client.Client, pool, pattern string) (*unstructured.Unstructured, error) {

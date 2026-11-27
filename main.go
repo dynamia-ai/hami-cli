@@ -500,12 +500,19 @@ func newPoolDescribeCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printPoolDescription(options.out, pool, bindings, regexBindings, devices)
+			var namespaceNames []string
+			if len(regexBindings.Items) > 0 {
+				namespaceNames, err = listNamespaceNamesForPreview(command.Context(), cli)
+				if err != nil {
+					command.PrintErrf("Warning: %v\n", err)
+				}
+			}
+			return printPoolDescription(options.out, pool, bindings, regexBindings, devices, namespaceNames)
 		},
 	}
 }
 
-func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, regexBindings *unstructured.UnstructuredList, devices *resourcepoolv1alpha1.GPUDeviceList) error {
+func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool, bindings *resourcepoolv1alpha1.ResourcePoolBindingList, regexBindings *unstructured.UnstructuredList, devices *resourcepoolv1alpha1.GPUDeviceList, namespaceNames []string) error {
 	nodePolicy, gpuPolicy := "<unset>", "<unset>"
 	cpuQuota, memoryQuota := poolQuotaValues(pool)
 	if pool.Spec.WorkloadDefaults != nil && pool.Spec.WorkloadDefaults.SchedulingPolicy != nil {
@@ -562,10 +569,11 @@ func printPoolDescription(out io.Writer, pool *resourcepoolv1alpha1.ResourcePool
 	if len(regexBindings.Items) > 0 {
 		fmt.Fprintln(out, "\nRegex bindings:")
 		writer = newTableWriter(out)
-		fmt.Fprintln(writer, "  ID\tNAMESPACE REGEX")
+		fmt.Fprintln(writer, "  ID\tNAMESPACE REGEX\tMATCHING NAMESPACES")
 		for i := range regexBindings.Items {
 			rule := &regexBindings.Items[i]
-			fmt.Fprintf(writer, "  %s\t%q\n", rule.GetName(), regexBindingPattern(rule))
+			pattern := regexBindingPattern(rule)
+			fmt.Fprintf(writer, "  %s\t%q\t%s\n", rule.GetName(), pattern, regexBindingMatchPreview(pattern, namespaceNames))
 		}
 		if err := writer.Flush(); err != nil {
 			return err
