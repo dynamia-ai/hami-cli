@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,6 +22,9 @@ func TestPoolRegexBindingLifecycle(t *testing.T) {
 	ctx := t.Context()
 	scheme := runtime.NewScheme()
 	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	pool := &resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", UID: "pool-a-uid"}}
@@ -130,6 +134,107 @@ func TestPoolRegexBindingPreview(t *testing.T) {
 			}
 			if err != nil || out.String() != tc.want {
 				t.Fatalf("preview: err = %v, output = %q, want %q", err, out.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestPoolDescribePreviewsRegexBindingMatches(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := resourcepoolv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	objects := []client.Object{
+		&resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "training"}},
+		&resourcepoolv1alpha1.ResourcePool{ObjectMeta: metav1.ObjectMeta{Name: "empty"}},
+	}
+	for _, name := range []string{"team-b", "prefix-team-a", "team-a", "team-b-suffix"} {
+		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	var opsNames []string
+	for i := 1; i <= 20; i++ {
+		name := fmt.Sprintf("ops-%02d", i)
+		opsNames = append(opsNames, name)
+		objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	}
+	opsPreview := strings.Join(opsNames, ", ")
+	for _, rule := range []struct{ id, pool, pattern string }{
+		{"rule-all", "training", ".*"},
+		{"rule-matches", "training", "team-b|team-a"},
+		{"rule-empty", "training", "absent"},
+		{"rule-exact", "training", "ops-.*"},
+		{"rule-invalid", "training", "["},
+		{"rule-other-pool", "other", ".*"},
+	} {
+		obj := regexBindingObject()
+		obj.SetName(rule.id)
+		obj.Object["spec"] = map[string]any{"poolRef": map[string]any{"name": rule.pool}, "namespaceRegex": rule.pattern}
+		objects = append(objects, obj)
+	}
+
+	const header = "ID NAMESPACE REGEX MATCHING NAMESPACES "
+	for _, tc := range []struct {
+		name, pool, wantTable string
+		forbidden             bool
+		wantNamespaceLists    int
+	}{
+		{
+			name: "sorted matches with a limit and total", pool: "training", wantNamespaceLists: 1,
+			wantTable: header + `rule-all ".*" ` + opsPreview + `, ... (24 total) ` +
+				`rule-empty "absent" <none> (0 total) ` +
+				`rule-exact "ops-.*" ` + opsPreview + ` (20 total) ` +
+				`rule-invalid "[" <invalid regex> ` +
+				`rule-matches "team-b|team-a" team-a, team-b (2 total)`,
+		},
+		{
+			name: "namespace list forbidden", pool: "training", wantNamespaceLists: 1, forbidden: true,
+			wantTable: header + `rule-all ".*" <unavailable> ` +
+				`rule-empty "absent" <unavailable> ` +
+				`rule-exact "ops-.*" <unavailable> ` +
+				`rule-invalid "[" <unavailable> ` +
+				`rule-matches "team-b|team-a" <unavailable>`,
+		},
+		{name: "no rules for pool", pool: "empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var namespaceLists int
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*corev1.NamespaceList); ok {
+						namespaceLists++
+						if tc.forbidden {
+							return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", nil)
+						}
+					}
+					return c.List(ctx, list, opts...)
+				},
+			}).Build()
+			var out, errOut bytes.Buffer
+			cmd := newRootCommand(&commandOptions{client: cli, out: &out, errOut: &errOut})
+			cmd.SetArgs([]string{"pool", "describe", tc.pool})
+			if err := cmd.ExecuteContext(t.Context()); err != nil {
+				t.Fatalf("pool describe: %v", err)
+			}
+			_, section, _ := strings.Cut(out.String(), "\nRegex bindings:\n")
+			table, _, _ := strings.Cut(section, "\n\n")
+			if got := strings.Join(strings.Fields(table), " "); got != tc.wantTable {
+				t.Errorf("regex bindings table = %q, want %q", got, tc.wantTable)
+			}
+			if !strings.Contains(out.String(), "\nDevices:\n") {
+				t.Errorf("pool describe did not show devices section: %s", out.String())
+			}
+			if tc.forbidden {
+				if !strings.Contains(errOut.String(), "list namespaces for preview") || !strings.Contains(errOut.String(), "forbidden") {
+					t.Errorf("namespace list denial warning = %q", errOut.String())
+				}
+			} else if errOut.Len() != 0 {
+				t.Errorf("unexpected stderr: %s", errOut.String())
+			}
+			if namespaceLists != tc.wantNamespaceLists {
+				t.Errorf("namespace list requests = %d, want %d", namespaceLists, tc.wantNamespaceLists)
 			}
 		})
 	}

@@ -21,6 +21,7 @@ import (
 
 const regexBindingKind = "ResourcePoolRegexBinding"
 const regexBindingResource = "resourcepoolregexbinding.resource.hami.io"
+const describeRegexMatchLimit = 20
 
 func regexBindingObject() *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
@@ -82,24 +83,63 @@ func compileNamespaceRegex(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(`\A(?:` + parsed.String() + `)\z`)
 }
 
-func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
+func listNamespaceNamesForPreview(ctx context.Context, cli client.Reader) ([]string, error) {
 	var namespaces corev1.NamespaceList
 	if err := cli.List(ctx, &namespaces); err != nil {
-		return fmt.Errorf("list namespaces for preview: %w", err)
+		return nil, fmt.Errorf("list namespaces for preview: %w", err)
 	}
-	var matches []string
+	names := make([]string, 0, len(namespaces.Items))
 	for i := range namespaces.Items {
-		name := namespaces.Items[i].Name
-		if pattern.MatchString(name) {
+		names = append(names, namespaces.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func matchingNamespaceNames(pattern *regexp.Regexp, names []string, limit int) ([]string, int) {
+	var matches []string
+	total := 0
+	for _, name := range names {
+		if !pattern.MatchString(name) {
+			continue
+		}
+		total++
+		if len(matches) < limit {
 			matches = append(matches, name)
 		}
 	}
-	sort.Strings(matches)
-	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, len(matches))
+	return matches, total
+}
+
+func previewRegexBinding(ctx context.Context, cli client.Reader, out io.Writer, pool string, pattern *regexp.Regexp) error {
+	names, err := listNamespaceNamesForPreview(ctx, cli)
+	if err != nil {
+		return err
+	}
+	matches, total := matchingNamespaceNames(pattern, names, len(names))
+	fmt.Fprintf(out, "Pool: %s\nMatching namespaces: %d\n", pool, total)
 	for _, name := range matches {
 		fmt.Fprintln(out, name)
 	}
 	return nil
+}
+
+func regexBindingMatchPreview(pattern string, namespaceNames []string) string {
+	if namespaceNames == nil {
+		return "<unavailable>"
+	}
+	compiled, err := compileNamespaceRegex(pattern)
+	if err != nil {
+		return "<invalid regex>"
+	}
+	matches, total := matchingNamespaceNames(compiled, namespaceNames, describeRegexMatchLimit)
+	if total == 0 {
+		return "<none> (0 total)"
+	}
+	if total > len(matches) {
+		matches = append(matches, "...")
+	}
+	return fmt.Sprintf("%s (%d total)", strings.Join(matches, ", "), total)
 }
 
 func createRegexBinding(ctx context.Context, cli client.Client, pool, pattern string) (*unstructured.Unstructured, error) {

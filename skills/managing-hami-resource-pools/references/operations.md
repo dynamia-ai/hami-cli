@@ -113,7 +113,7 @@ Check these details when reading `pool describe` output:
 
 - Trust reported CPU and memory used and reserved values when the same read shows `Quota ledger` as `current (generation N)`, or `status.quota.observedGeneration` equal to `metadata.generation` in JSON. A pending or stale ledger cannot confirm available quota.
 - `Explicit namespace bindings:` lists explicit `ResourcePoolBinding` objects matching `spec.poolRef.name` across all namespaces (`<none>` when empty).
-- `Regex bindings:` appears right after `Explicit namespace bindings:` and before `Devices:` when matching `ResourcePoolRegexBinding` rules exist. If the regex CRD is absent or no rules match, `pool describe` omits that section.
+- `Regex bindings:` shows the rules for this pool. The `MATCHING NAMESPACES` column shows the total and up to 20 matches per rule in name order. The list ends with `...` if more than 20 namespaces match. With no matches, the column shows `<none> (0 total)`. The preview needs cluster-scoped `list` on `namespaces`. If the namespace query fails, the command warns and shows `<unavailable>` in the column. If the regex CRD is absent or the pool has no rules, `pool describe` omits the section.
 - `Devices:` lists `GPUDevice` objects matching `spec.poolRef.name`, including the `DEVICE-TYPE` column (`<none>` when empty).
 - Describe needs `get` on the pool and `list` on bindings across namespaces, devices, and regex rules when served. It propagates a forbidden list error. For a quota-only read, `pool list -o json` returns the spec and ledger without querying these associations.
 
